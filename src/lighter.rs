@@ -25,7 +25,9 @@ pub fn highlight(
     output: Output,
 ) -> Result<String> {
     let server = registry.get_server(lang).map_err(Error::ServerError)?;
-    let tokens = server.get_semantic_tokens(input);
+    let tokens = server
+        .get_semantic_tokens(input)
+        .map_err(Error::ServerError)?;
     //
     // Stub: In the full implementation, this will:
     // 1. Parse source code using arborium advanced module
