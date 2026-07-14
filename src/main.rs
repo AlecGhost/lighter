@@ -5,6 +5,7 @@ use std::io::{self, Read};
 use std::path::PathBuf;
 
 use clap::Parser;
+use clap::builder::PossibleValuesParser;
 
 mod lighter;
 mod lsp;
@@ -26,9 +27,18 @@ struct Cli {
     #[arg(short, long)]
     config: Option<PathBuf>,
 
-    /// Path to a TOML theme file.
-    #[arg(long)]
-    theme: Option<PathBuf>,
+    /// Name of a built-in Arborium theme.
+    #[arg(
+        long,
+        conflicts_with = "custom_theme",
+        ignore_case = true,
+        value_parser = builtin_theme_parser()
+    )]
+    theme: Option<String>,
+
+    /// Path to a custom TOML theme file.
+    #[arg(long, conflicts_with = "theme")]
+    custom_theme: Option<PathBuf>,
 
     /// Possible outputs are ANSI-colored terminal output or HTML.
     #[arg(short, long, value_enum, default_value_t = lighter::Output::Ansi)]
@@ -94,10 +104,25 @@ fn load_config(path: &PathBuf) -> Result<Config> {
     Ok(Config { commands })
 }
 
-fn load_theme(path: &PathBuf) -> Result<arborium::theme::Theme> {
+fn load_custom_theme(path: &PathBuf) -> Result<arborium::theme::Theme> {
     let text = fs::read_to_string(path)
         .with_context(|| format!("Failed to read theme file '{}'", path.display()))?;
     lighter::parse_theme(&text).with_context(|| format!("Invalid theme file '{}'", path.display()))
+}
+
+fn builtin_theme_parser() -> PossibleValuesParser {
+    PossibleValuesParser::new(
+        arborium::theme::builtin::all()
+            .into_iter()
+            .map(|theme| theme.name),
+    )
+}
+
+fn load_builtin_theme(name: &str) -> Result<arborium::theme::Theme> {
+    arborium::theme::builtin::all()
+        .into_iter()
+        .find(|theme| theme.name.eq_ignore_ascii_case(name))
+        .ok_or_else(|| anyhow!("Unknown built-in theme '{name}'"))
 }
 
 /// Read input source code: from a file path or from stdin.
@@ -151,9 +176,11 @@ fn main() -> Result<()> {
         (false, Some(path)) => load_config(path)?.commands,
         (false, None) => Config::default().commands,
     };
-    let theme = match cli.theme.as_ref() {
-        Some(path) => load_theme(path)?,
-        None => lighter::default_theme(),
+    let theme = match (cli.theme.as_deref(), cli.custom_theme.as_ref()) {
+        (Some(name), None) => load_builtin_theme(name)?,
+        (None, Some(path)) => load_custom_theme(path)?,
+        (None, None) => lighter::default_theme(),
+        (Some(_), Some(_)) => unreachable!("clap rejects conflicting theme options"),
     };
 
     let mut registry = lsp::ServerRegistry::new(commands);
@@ -173,4 +200,31 @@ fn main() -> Result<()> {
     print!("{output}");
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::error::ErrorKind;
+
+    const BUILTIN_THEME_NAME: &str = "Dracula";
+
+    fn parse_builtin_theme(name: &str) -> clap::error::Result<Cli> {
+        Cli::try_parse_from(["lighter", "--theme", name])
+    }
+
+    #[test]
+    fn dynamic_parser_accepts_builtin_theme_case_insensitively() {
+        let cli = parse_builtin_theme(&BUILTIN_THEME_NAME.to_lowercase()).unwrap();
+        let theme = load_builtin_theme(cli.theme.as_deref().unwrap()).unwrap();
+
+        assert_eq!(theme.name, BUILTIN_THEME_NAME);
+    }
+
+    #[test]
+    fn dynamic_parser_rejects_unknown_theme() {
+        let error = parse_builtin_theme("unknown").unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::InvalidValue);
+    }
 }
