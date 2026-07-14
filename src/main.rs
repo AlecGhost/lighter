@@ -27,8 +27,16 @@ struct Cli {
     config: Option<PathBuf>,
 
     /// Possible outputs are ANSI-colored terminal output or HTML.
-    #[arg(short, long, value_enum, default_value_t = lighter::Output::ANSI)]
+    #[arg(short, long, value_enum, default_value_t = lighter::Output::Ansi)]
     format: lighter::Output,
+
+    /// Disable LSP semantic highlighting.
+    #[arg(long)]
+    no_lsp: bool,
+
+    /// Disable tree-sitter syntax highlighting.
+    #[arg(long)]
+    no_tree_sitter: bool,
 }
 
 #[derive(serde::Deserialize)]
@@ -128,18 +136,23 @@ fn main() -> Result<()> {
 
     let source = read_input(cli.file.as_ref())?;
     let lang = resolve_language(cli.lang.as_deref(), cli.file.as_ref())?;
-    let config = cli
-        .config
-        .as_ref()
-        .map_or_else(|| Ok(Config::default()), load_config)?;
+    let commands = match (cli.no_lsp, cli.config.as_ref()) {
+        (true, _) => HashMap::new(),
+        (false, Some(path)) => load_config(path)?.commands,
+        (false, None) => Config::default().commands,
+    };
 
-    let mut registry = lsp::ServerRegistry::new(config.commands);
+    let mut registry = lsp::ServerRegistry::new(commands);
     let output = lighter::highlight(
         &source,
         cli.file.as_deref(),
         lang,
         &mut registry,
-        cli.format,
+        lighter::HighlightOptions {
+            output: cli.format,
+            lsp: !cli.no_lsp,
+            tree_sitter: !cli.no_tree_sitter,
+        },
     )?;
 
     print!("{output}");
