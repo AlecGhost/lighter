@@ -26,6 +26,10 @@ struct Cli {
     #[arg(short, long)]
     config: Option<PathBuf>,
 
+    /// Path to a TOML theme file.
+    #[arg(long)]
+    theme: Option<PathBuf>,
+
     /// Possible outputs are ANSI-colored terminal output or HTML.
     #[arg(short, long, value_enum, default_value_t = lighter::Output::Ansi)]
     format: lighter::Output,
@@ -90,6 +94,12 @@ fn load_config(path: &PathBuf) -> Result<Config> {
     Ok(Config { commands })
 }
 
+fn load_theme(path: &PathBuf) -> Result<arborium::theme::Theme> {
+    let text = fs::read_to_string(path)
+        .with_context(|| format!("Failed to read theme file '{}'", path.display()))?;
+    lighter::parse_theme(&text).with_context(|| format!("Invalid theme file '{}'", path.display()))
+}
+
 /// Read input source code: from a file path or from stdin.
 fn read_input(path: Option<&PathBuf>) -> Result<String> {
     match path {
@@ -141,6 +151,10 @@ fn main() -> Result<()> {
         (false, Some(path)) => load_config(path)?.commands,
         (false, None) => Config::default().commands,
     };
+    let theme = match cli.theme.as_ref() {
+        Some(path) => load_theme(path)?,
+        None => lighter::default_theme(),
+    };
 
     let mut registry = lsp::ServerRegistry::new(commands);
     let output = lighter::highlight(
@@ -148,10 +162,11 @@ fn main() -> Result<()> {
         cli.file.as_deref(),
         lang,
         &mut registry,
-        lighter::HighlightOptions {
+        &lighter::HighlightOptions {
             output: cli.format,
             lsp: !cli.no_lsp,
             tree_sitter: !cli.no_tree_sitter,
+            theme,
         },
     )?;
 

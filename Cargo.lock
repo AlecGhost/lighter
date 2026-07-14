@@ -1256,6 +1256,9 @@ name = "arborium-theme"
 version = "2.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a00a8f02b994f454d9703dd6a8b6075ba778320550d699198faff1882594c0f7"
+dependencies = [
+ "toml",
+]
 
 [[package]]
 name = "arborium-thrift"
@@ -1633,6 +1636,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "arborium",
+ "arborium-theme",
  "clap",
  "lsp-types",
  "serde",

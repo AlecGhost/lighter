@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use arborium::advanced::{Span, spans_to_ansi, spans_to_html};
-use arborium::theme::builtin;
+use arborium::theme::{Theme, builtin};
 use lsp_types::{SemanticToken, SemanticTokenType, SemanticTokensLegend};
 use thiserror::Error;
 
@@ -25,8 +25,9 @@ const CAPTURE_TYPE: &str = "type";
 const CAPTURE_TYPE_PARAMETER: &str = "type.parameter";
 const CAPTURE_VARIABLE: &str = "variable";
 const CAPTURE_VARIABLE_PARAMETER: &str = "variable.parameter";
+const THEME_COLORS_TABLE: &str = "colors";
 
-#[derive(Debug, Default, Clone, clap::ValueEnum)]
+#[derive(Debug, Default, Clone, Copy, clap::ValueEnum)]
 pub enum Output {
     #[default]
     Ansi,
@@ -37,6 +38,7 @@ pub struct HighlightOptions {
     pub output: Output,
     pub lsp: bool,
     pub tree_sitter: bool,
+    pub theme: Theme,
 }
 
 #[derive(Error, Debug)]
@@ -49,15 +51,31 @@ pub enum Error {
 
 type Result<T> = std::result::Result<T, Error>;
 
+pub fn default_theme() -> Theme {
+    builtin::catppuccin_mocha()
+}
+
+pub fn parse_theme(input: &str) -> anyhow::Result<Theme> {
+    let document: toml::Table = toml::from_str(input)?;
+    let colors = document
+        .get(THEME_COLORS_TABLE)
+        .and_then(toml::Value::as_table)
+        .ok_or_else(|| anyhow::anyhow!("Missing [{THEME_COLORS_TABLE}] table"))?;
+    let colors = toml::to_string(colors)?;
+
+    Ok(Theme::from_toml(&colors)?)
+}
+
 /// Highlight source with tree-sitter syntax and LSP semantic information.
 pub fn highlight(
     input: &str,
     path: Option<&Path>,
     lang: LangName,
     registry: &mut lsp::ServerRegistry,
-    options: HighlightOptions,
+    options: &HighlightOptions,
 ) -> Result<String> {
     let mut spans = if options.tree_sitter {
+        // TODO: get injections and add lsp highlighting for injected languages
         arborium::Highlighter::new().highlight_spans(&lang, input)?
     } else {
         Vec::new()
@@ -77,7 +95,7 @@ pub fn highlight(
         ));
     }
 
-    Ok(render(input, spans, options.output))
+    Ok(render(input, spans, options.output, &options.theme))
 }
 
 fn next_pattern_index(spans: &[Span]) -> u32 {
@@ -159,9 +177,9 @@ fn capture_for_token_type(token_type: &SemanticTokenType) -> &str {
     }
 }
 
-fn render(source: &str, spans: Vec<Span>, output: Output) -> String {
+fn render(source: &str, spans: Vec<Span>, output: Output, theme: &Theme) -> String {
     match output {
-        Output::Ansi => spans_to_ansi(source, spans, &builtin::catppuccin_mocha()),
+        Output::Ansi => spans_to_ansi(source, spans, theme),
         Output::Html => spans_to_html(source, spans, &arborium::HtmlFormat::default()),
     }
 }
@@ -232,6 +250,13 @@ mod tests {
 
     const SOURCE: &str = "let 😀 = value;\r\ncall(😀);";
     const SEMANTIC_PATTERN_INDEX: u32 = 42;
+    const THEME_SOURCE: &str = r##"
+name = "Test theme"
+variant = "light"
+
+[colors]
+keyword = "#010203"
+"##;
 
     fn token(delta_line: u32, delta_start: u32, length: u32, token_type: u32) -> SemanticToken {
         SemanticToken {
@@ -305,5 +330,21 @@ mod tests {
         }];
 
         assert_eq!(next_pattern_index(&spans), SEMANTIC_PATTERN_INDEX + 1);
+    }
+
+    #[test]
+    fn applies_parsed_theme_colors() {
+        let theme = parse_theme(THEME_SOURCE).unwrap();
+        let source = "let";
+        let spans = vec![Span {
+            start: 0,
+            end: source.len() as u32,
+            capture: CAPTURE_KEYWORD.to_owned(),
+            pattern_index: 0,
+        }];
+
+        let rendered = render(source, spans, Output::Ansi, &theme);
+
+        assert!(rendered.contains("\u{1b}[38;2;1;2;3m"));
     }
 }
