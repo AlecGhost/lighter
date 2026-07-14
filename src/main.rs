@@ -134,7 +134,13 @@ fn main() -> Result<()> {
         .map_or_else(|| Ok(Config::default()), load_config)?;
 
     let mut registry = lsp::ServerRegistry::new(config.commands);
-    let output = lighter::highlight(&source, lang, &mut registry, cli.format)?;
+    let output = lighter::highlight(
+        &source,
+        cli.file.as_deref(),
+        lang,
+        &mut registry,
+        cli.format,
+    )?;
 
     print!("{output}");
 

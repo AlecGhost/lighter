@@ -1,3 +1,4 @@
+use std::path::Path;
 use thiserror::Error;
 
 use crate::lsp::{self, LangName};
@@ -20,13 +21,14 @@ type Result<T> = std::result::Result<T, Error>;
 /// The highlight pipeline.
 pub fn highlight(
     input: &str,
+    path: Option<&Path>,
     lang: LangName,
     registry: &mut lsp::ServerRegistry,
     output: Output,
 ) -> Result<String> {
     let server = registry.get_server(lang).map_err(Error::ServerError)?;
     let tokens = server
-        .get_semantic_tokens(input)
+        .get_semantic_tokens(input, path)
         .map_err(Error::ServerError)?;
     //
     // Stub: In the full implementation, this will:

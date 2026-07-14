@@ -11,6 +11,9 @@ use lsp_types::{
     TextDocumentItem, TokenFormat, Uri, WorkDoneProgressParams,
 };
 use std::collections::HashMap;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::rc::Rc;
 use std::str::FromStr;
@@ -20,7 +23,13 @@ use thiserror::Error;
 
 pub type LangName = Rc<str>;
 
-const VIRTUAL_DOCUMENT_URI_PREFIX: &str = "untitled:";
+const FILE_URI_PREFIX: &str = "file://";
+const TEMP_FILE_PREFIX: &str = "lighter";
+const DEFAULT_DOCUMENT_EXTENSION: &str = "txt";
+const MAX_TEMP_FILE_ATTEMPTS: usize = 100;
+const URI_HEX_DIGITS: &[u8; 16] = b"0123456789ABCDEF";
+
+static NEXT_TEMP_FILE_ID: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Error, Debug)]
 pub enum Error {
@@ -30,6 +39,8 @@ pub enum Error {
     FailedServerCommand(String, #[source] std::io::Error),
     #[error("Language server I/O failed: {0}")]
     Io(#[from] std::io::Error),
+    #[error("Could not create a file URI for document path '{0}'")]
+    InvalidDocumentUri(PathBuf),
     #[error(transparent)]
     Rpc(#[from] rpc::Error),
 }
@@ -129,8 +140,49 @@ impl Server<'_> {
     pub fn get_semantic_tokens(
         &self,
         input: &str,
+        path: Option<&Path>,
     ) -> Result<Option<(Vec<SemanticToken>, SemanticTokensLegend)>> {
-        self.client.get_semantic_tokens(input)
+        self.client.get_semantic_tokens(input, path)
+    }
+}
+
+#[derive(Debug)]
+struct Document {
+    uri: Uri,
+    temporary_document: Option<TemporaryDocument>,
+}
+
+impl Document {
+    fn new(text: &str, path: Option<&Path>, language: &str) -> Result<Document> {
+        let (path, temporary_path) = match path {
+            Some(path) => (fs::canonicalize(path)?, None),
+            None => {
+                let temporary_document = create_temporary_document(text, language)?;
+                (temporary_document.path.clone(), Some(temporary_document))
+            }
+        };
+
+        Ok(Document {
+            uri: file_uri(&path)?,
+            temporary_document: temporary_path,
+        })
+    }
+}
+
+impl Drop for Document {
+    fn drop(&mut self) {
+        drop(self.temporary_document.take());
+    }
+}
+
+#[derive(Debug)]
+struct TemporaryDocument {
+    path: PathBuf,
+}
+
+impl Drop for TemporaryDocument {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
     }
 }
 
@@ -146,7 +198,6 @@ struct Client {
     connection: Mutex<Connection>,
     language: String,
     semantic_tokens_legend: Option<SemanticTokensLegend>,
-    next_file_id: AtomicUsize,
 }
 
 impl Client {
@@ -165,7 +216,6 @@ impl Client {
             connection: Mutex::new(connection),
             language: language.to_string(),
             semantic_tokens_legend,
-            next_file_id: AtomicUsize::new(0),
         })
     }
 
@@ -265,14 +315,14 @@ impl Client {
     fn get_semantic_tokens(
         &self,
         text: &str,
+        path: Option<&Path>,
     ) -> Result<Option<(Vec<SemanticToken>, SemanticTokensLegend)>> {
         let Some(legend) = self.semantic_tokens_legend.clone() else {
             return Ok(None);
         };
 
-        let file_id = self.next_file_id.fetch_add(1, Ordering::Relaxed);
-        let uri = Uri::from_str(&format!("{VIRTUAL_DOCUMENT_URI_PREFIX}{file_id}"))
-            .expect("Generated virtual document URI is valid");
+        let document = Document::new(text, path, &self.language)?;
+        let uri = document.uri.clone();
         let mut connection = self.connection.lock().expect("Connection lock poisoned");
 
         connection
@@ -314,6 +364,83 @@ impl Client {
     }
 }
 
+fn create_temporary_document(text: &str, language: &str) -> Result<TemporaryDocument> {
+    let extension = document_extension(language);
+    let directory = std::env::temp_dir();
+
+    for _ in 0..MAX_TEMP_FILE_ATTEMPTS {
+        let id = NEXT_TEMP_FILE_ID.fetch_add(1, Ordering::Relaxed);
+        let path = directory.join(format!(
+            "{TEMP_FILE_PREFIX}-{}-{id}.{extension}",
+            std::process::id()
+        ));
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut file) => {
+                let temporary_document = TemporaryDocument { path };
+                file.write_all(text.as_bytes())?;
+                return Ok(temporary_document);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error.into()),
+        }
+    }
+
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "Could not allocate a unique temporary document path",
+    )
+    .into())
+}
+
+fn document_extension(language: &str) -> &str {
+    match language {
+        "rust" => "rs",
+        "python" => "py",
+        "typescript" => "ts",
+        "javascript" => "js",
+        "cpp" => "cpp",
+        "csharp" => "cs",
+        "kotlin" => "kt",
+        "haskell" => "hs",
+        "ocaml" => "ml",
+        "latex" => "tex",
+        other if other.bytes().all(|byte| byte.is_ascii_alphanumeric()) => other,
+        _ => DEFAULT_DOCUMENT_EXTENSION,
+    }
+}
+
+fn file_uri(path: &Path) -> Result<Uri> {
+    debug_assert!(path.is_absolute());
+    let mut encoded = String::from(FILE_URI_PREFIX);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        percent_encode_path(path.as_os_str().as_bytes(), &mut encoded);
+    }
+
+    #[cfg(not(unix))]
+    {
+        encoded.push('/');
+        let path = path.to_string_lossy().replace('\\', "/");
+        percent_encode_path(path.as_bytes(), &mut encoded);
+    }
+
+    Uri::from_str(&encoded).map_err(|_| Error::InvalidDocumentUri(path.to_path_buf()))
+}
+
+fn percent_encode_path(path: &[u8], encoded: &mut String) {
+    for &byte in path {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~' | b'/' | b':') {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push('%');
+            encoded.push(char::from(URI_HEX_DIGITS[usize::from(byte >> 4)]));
+            encoded.push(char::from(URI_HEX_DIGITS[usize::from(byte & 0x0f)]));
+        }
+    }
+}
+
 impl Drop for Client {
     fn drop(&mut self) {
         let connection = self
@@ -348,6 +475,8 @@ mod tests {
     use super::*;
     use lsp_types::{SemanticTokensOptions, WorkDoneProgressOptions};
 
+    const TEST_SOURCE: &str = "fn main() {}";
+
     #[test]
     fn semantic_tokens_require_full_document_support() {
         let legend = SemanticTokensLegend {
@@ -374,5 +503,30 @@ mod tests {
                 .token_types[0],
             SemanticTokenType::FUNCTION
         );
+    }
+
+    #[test]
+    fn file_uri_percent_encodes_path_characters() {
+        let path = std::env::temp_dir().join("lighter test#?.rs");
+        let uri = file_uri(&path).unwrap();
+
+        assert!(uri.as_str().starts_with(FILE_URI_PREFIX));
+        assert!(uri.as_str().ends_with("lighter%20test%23%3F.rs"));
+    }
+
+    #[test]
+    fn temporary_rust_document_is_file_backed_and_removed_on_drop() {
+        let document = Document::new(TEST_SOURCE, None, "rust").unwrap();
+        let path = document.temporary_document.as_ref().unwrap().path.clone();
+
+        assert!(document.uri.as_str().starts_with(FILE_URI_PREFIX));
+        assert_eq!(
+            path.extension().and_then(|value| value.to_str()),
+            Some("rs")
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), TEST_SOURCE);
+
+        drop(document);
+        assert!(!path.exists());
     }
 }
