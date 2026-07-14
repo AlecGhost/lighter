@@ -25,7 +25,6 @@ const CAPTURE_TYPE: &str = "type";
 const CAPTURE_TYPE_PARAMETER: &str = "type.parameter";
 const CAPTURE_VARIABLE: &str = "variable";
 const CAPTURE_VARIABLE_PARAMETER: &str = "variable.parameter";
-const THEME_COLORS_TABLE: &str = "colors";
 
 #[derive(Debug, Default, Clone, Copy, clap::ValueEnum)]
 pub enum Output {
@@ -53,17 +52,6 @@ type Result<T> = std::result::Result<T, Error>;
 
 pub fn default_theme() -> Theme {
     builtin::catppuccin_mocha()
-}
-
-pub fn parse_theme(input: &str) -> anyhow::Result<Theme> {
-    let document: toml::Table = toml::from_str(input)?;
-    let colors = document
-        .get(THEME_COLORS_TABLE)
-        .and_then(toml::Value::as_table)
-        .ok_or_else(|| anyhow::anyhow!("Missing [{THEME_COLORS_TABLE}] table"))?;
-    let colors = toml::to_string(colors)?;
-
-    Ok(Theme::from_toml(&colors)?)
 }
 
 /// Highlight source with tree-sitter syntax and LSP semantic information.
@@ -254,8 +242,10 @@ mod tests {
 name = "Test theme"
 variant = "light"
 
-[colors]
-keyword = "#010203"
+"keyword" = { fg = "mauve" }
+
+[palette]
+mauve = "#010203"
 "##;
 
     fn token(delta_line: u32, delta_start: u32, length: u32, token_type: u32) -> SemanticToken {
@@ -334,7 +324,7 @@ keyword = "#010203"
 
     #[test]
     fn applies_parsed_theme_colors() {
-        let theme = parse_theme(THEME_SOURCE).unwrap();
+        let theme = Theme::from_toml(THEME_SOURCE).unwrap();
         let source = "let";
         let spans = vec![Span {
             start: 0,

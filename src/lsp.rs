@@ -60,7 +60,7 @@ pub struct CommandEntry {
 pub fn default_commands() -> HashMap<LangName, CommandEntry> {
     let entries: &[(&str, &str, &[&str])] = &[
         ("rust", "rust-analyzer", &[]),
-        ("python", "pylsp", &[]),
+        ("python", "basedpyright-langserver", &["--stdio"]),
         ("typescript", "typescript-language-server", &["--stdio"]),
         ("javascript", "typescript-language-server", &["--stdio"]),
         ("tsx", "typescript-language-server", &["--stdio"]),

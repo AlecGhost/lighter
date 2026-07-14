@@ -107,7 +107,8 @@ fn load_config(path: &PathBuf) -> Result<Config> {
 fn load_custom_theme(path: &PathBuf) -> Result<arborium::theme::Theme> {
     let text = fs::read_to_string(path)
         .with_context(|| format!("Failed to read theme file '{}'", path.display()))?;
-    lighter::parse_theme(&text).with_context(|| format!("Invalid theme file '{}'", path.display()))
+    arborium::theme::Theme::from_toml(&text)
+        .with_context(|| format!("Invalid theme file '{}'", path.display()))
 }
 
 fn builtin_theme_parser() -> PossibleValuesParser {
