@@ -25,12 +25,16 @@ const CAPTURE_TYPE: &str = "type";
 const CAPTURE_TYPE_PARAMETER: &str = "type.parameter";
 const CAPTURE_VARIABLE: &str = "variable";
 const CAPTURE_VARIABLE_PARAMETER: &str = "variable.parameter";
+const TREE_SITTER_SPANS_HEADING: &str = "Tree-sitter spans:";
+const LSP_SPANS_HEADING: &str = "LSP spans:";
 
 #[derive(Debug, Default, Clone, Copy, clap::ValueEnum)]
 pub enum Output {
     #[default]
     Ansi,
     Html,
+    #[value(alias = "spans")]
+    Debug,
 }
 
 pub struct HighlightOptions {
@@ -62,28 +66,31 @@ pub fn highlight(
     registry: &mut lsp::ServerRegistry,
     options: &HighlightOptions,
 ) -> Result<String> {
-    let mut spans = if options.tree_sitter {
+    let tree_sitter_spans = if options.tree_sitter {
         // TODO: get injections and add lsp highlighting for injected languages
         arborium::Highlighter::new().highlight_spans(&lang, input)?
     } else {
         Vec::new()
     };
 
-    if options.lsp
+    let lsp_spans = if options.lsp
         && let Some((tokens, legend)) = registry
             .get_server(lang)?
             .get_semantic_tokens(input, path)?
     {
-        let pattern_index = next_pattern_index(&spans);
-        spans.extend(semantic_tokens_to_spans(
-            input,
-            &tokens,
-            &legend,
-            pattern_index,
-        ));
-    }
+        let pattern_index = next_pattern_index(&tree_sitter_spans);
+        semantic_tokens_to_spans(input, &tokens, &legend, pattern_index)
+    } else {
+        Vec::new()
+    };
 
-    Ok(render(input, spans, options.output, &options.theme))
+    Ok(render(
+        input,
+        tree_sitter_spans,
+        lsp_spans,
+        options.output,
+        &options.theme,
+    ))
 }
 
 fn next_pattern_index(spans: &[Span]) -> u32 {
@@ -165,11 +172,57 @@ fn capture_for_token_type(token_type: &SemanticTokenType) -> &str {
     }
 }
 
-fn render(source: &str, spans: Vec<Span>, output: Output, theme: &Theme) -> String {
+fn render(
+    source: &str,
+    tree_sitter_spans: Vec<Span>,
+    lsp_spans: Vec<Span>,
+    output: Output,
+    theme: &Theme,
+) -> String {
     match output {
-        Output::Ansi => spans_to_ansi(source, spans, theme),
-        Output::Html => spans_to_html(source, spans, &arborium::HtmlFormat::default()),
+        Output::Ansi => spans_to_ansi(source, merge_spans(tree_sitter_spans, lsp_spans), theme),
+        Output::Html => spans_to_html(
+            source,
+            merge_spans(tree_sitter_spans, lsp_spans),
+            &arborium::HtmlFormat::default(),
+        ),
+        Output::Debug => render_debug_spans(source, tree_sitter_spans, lsp_spans),
     }
+}
+
+fn merge_spans(mut tree_sitter_spans: Vec<Span>, lsp_spans: Vec<Span>) -> Vec<Span> {
+    tree_sitter_spans.extend(lsp_spans);
+    tree_sitter_spans
+}
+
+fn render_debug_spans(
+    source: &str,
+    mut tree_sitter_spans: Vec<Span>,
+    mut lsp_spans: Vec<Span>,
+) -> String {
+    sort_spans_by_position(&mut tree_sitter_spans);
+    sort_spans_by_position(&mut lsp_spans);
+
+    let tree_sitter_lines = format_span_lines(source, &tree_sitter_spans);
+    let lsp_lines = format_span_lines(source, &lsp_spans);
+    format!("{TREE_SITTER_SPANS_HEADING}\n{tree_sitter_lines}\n\n{LSP_SPANS_HEADING}\n{lsp_lines}")
+}
+
+fn sort_spans_by_position(spans: &mut [Span]) {
+    spans.sort_by_key(|span| (span.start, span.end));
+}
+
+fn format_span_lines(source: &str, spans: &[Span]) -> String {
+    spans
+        .iter()
+        .map(|span| {
+            let text = source
+                .get(span.start as usize..span.end as usize)
+                .unwrap_or_default();
+            format!("{span:?} {text:?}")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 struct LineIndex<'source> {
@@ -333,8 +386,52 @@ mauve = "#010203"
             pattern_index: 0,
         }];
 
-        let rendered = render(source, spans, Output::Ansi, &theme);
+        let rendered = render(source, spans, Vec::new(), Output::Ansi, &theme);
 
         assert!(rendered.contains("\u{1b}[38;2;1;2;3m"));
+    }
+
+    #[test]
+    fn debug_output_separates_and_sorts_span_sources() {
+        const DEBUG_SOURCE: &str = "let call value";
+        let tree_sitter_spans = vec![
+            span(9, 14, CAPTURE_VARIABLE, 1),
+            span(0, 3, CAPTURE_KEYWORD, 0),
+        ];
+        let lsp_spans = vec![
+            span(9, 14, CAPTURE_VARIABLE, SEMANTIC_PATTERN_INDEX),
+            span(4, 8, CAPTURE_FUNCTION, SEMANTIC_PATTERN_INDEX),
+        ];
+
+        let rendered = render_debug_spans(DEBUG_SOURCE, tree_sitter_spans, lsp_spans);
+        let expected = [
+            TREE_SITTER_SPANS_HEADING.to_owned(),
+            format!("{:?} {:?}", span(0, 3, CAPTURE_KEYWORD, 0), "let"),
+            format!("{:?} {:?}", span(9, 14, CAPTURE_VARIABLE, 1), "value"),
+            String::new(),
+            LSP_SPANS_HEADING.to_owned(),
+            format!(
+                "{:?} {:?}",
+                span(4, 8, CAPTURE_FUNCTION, SEMANTIC_PATTERN_INDEX),
+                "call"
+            ),
+            format!(
+                "{:?} {:?}",
+                span(9, 14, CAPTURE_VARIABLE, SEMANTIC_PATTERN_INDEX),
+                "value"
+            ),
+        ]
+        .join("\n");
+
+        assert_eq!(rendered, expected);
+    }
+
+    fn span(start: u32, end: u32, capture: &str, pattern_index: u32) -> Span {
+        Span {
+            start,
+            end,
+            capture: capture.to_owned(),
+            pattern_index,
+        }
     }
 }

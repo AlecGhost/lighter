@@ -40,7 +40,7 @@ struct Cli {
     #[arg(long, conflicts_with = "theme")]
     custom_theme: Option<PathBuf>,
 
-    /// Possible outputs are ANSI-colored terminal output or HTML.
+    /// Output highlighted ANSI, HTML, or debug span lists.
     #[arg(short, long, value_enum, default_value_t = lighter::Output::Ansi)]
     format: lighter::Output,
 
