@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::Path;
 
 use arborium::advanced::{Span, spans_to_ansi, spans_to_html};
@@ -7,26 +8,41 @@ use thiserror::Error;
 
 use crate::lsp::{self, LangName};
 
-const CAPTURE_ATTRIBUTE: &str = "attribute";
-const CAPTURE_COMMENT: &str = "comment";
-const CAPTURE_CONSTANT: &str = "constant";
-const CAPTURE_FUNCTION: &str = "function";
-const CAPTURE_FUNCTION_MACRO: &str = "function.macro";
-const CAPTURE_FUNCTION_METHOD: &str = "function.method";
-const CAPTURE_KEYWORD: &str = "keyword";
-const CAPTURE_KEYWORD_MODIFIER: &str = "keyword.modifier";
-const CAPTURE_NAMESPACE: &str = "namespace";
-const CAPTURE_NUMBER: &str = "number";
-const CAPTURE_OPERATOR: &str = "operator";
-const CAPTURE_PROPERTY: &str = "property";
-const CAPTURE_STRING: &str = "string";
-const CAPTURE_STRING_REGEXP: &str = "string.regexp";
-const CAPTURE_TYPE: &str = "type";
-const CAPTURE_TYPE_PARAMETER: &str = "type.parameter";
-const CAPTURE_VARIABLE: &str = "variable";
-const CAPTURE_VARIABLE_PARAMETER: &str = "variable.parameter";
 const TREE_SITTER_SPANS_HEADING: &str = "Tree-sitter spans:";
 const LSP_SPANS_HEADING: &str = "LSP spans:";
+
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct CaptureMappings {
+    #[serde(flatten)]
+    mappings: HashMap<String, CaptureMapping>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(untagged)]
+enum CaptureMapping {
+    Capture(String),
+    Language(HashMap<String, String>),
+}
+
+impl CaptureMappings {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn get(&self, capture: &str, language: &str) -> Option<&str> {
+        self.mappings
+            .get(language)
+            .and_then(|mapping| match mapping {
+                CaptureMapping::Language(captures) => captures.get(capture),
+                CaptureMapping::Capture(_) => None,
+            })
+            .or_else(|| match self.mappings.get(capture) {
+                Some(CaptureMapping::Capture(capture)) => Some(capture),
+                Some(CaptureMapping::Language(_)) | None => None,
+            })
+            .map(String::as_str)
+    }
+}
 
 #[derive(Debug, Default, Clone, Copy, clap::ValueEnum)]
 pub enum Output {
@@ -42,6 +58,7 @@ pub struct HighlightOptions {
     pub lsp: bool,
     pub tree_sitter: bool,
     pub theme: Theme,
+    pub captures: CaptureMappings,
 }
 
 #[derive(Error, Debug)]
@@ -75,11 +92,18 @@ pub fn highlight(
 
     let lsp_spans = if options.lsp
         && let Some((tokens, legend)) = registry
-            .get_server(lang)?
+            .get_server(lang.clone())?
             .get_semantic_tokens(input, path)?
     {
         let pattern_index = next_pattern_index(&tree_sitter_spans);
-        semantic_tokens_to_spans(input, &tokens, &legend, pattern_index)
+        semantic_tokens_to_spans(
+            input,
+            &tokens,
+            &legend,
+            pattern_index,
+            &lang,
+            &options.captures,
+        )
     } else {
         Vec::new()
     };
@@ -107,6 +131,8 @@ fn semantic_tokens_to_spans(
     tokens: &[SemanticToken],
     legend: &SemanticTokensLegend,
     pattern_index: u32,
+    language: &str,
+    captures: &CaptureMappings,
 ) -> Vec<Span> {
     let lines = LineIndex::new(source);
     let mut line = 0_u32;
@@ -128,46 +154,42 @@ fn semantic_tokens_to_spans(
             Some(Span {
                 start: u32::try_from(start).ok()?,
                 end: u32::try_from(end).ok()?,
-                capture: capture_for_token_type(token_type).to_owned(),
+                capture: capture_for_token_type(token_type, language, captures).to_owned(),
                 pattern_index,
             })
         })
         .collect()
 }
 
-fn capture_for_token_type(token_type: &SemanticTokenType) -> &str {
+fn capture_for_token_type<'a>(
+    token_type: &'a SemanticTokenType,
+    language: &str,
+    captures: &'a CaptureMappings,
+) -> &'a str {
+    captures
+        .get(token_type.as_str(), language)
+        .unwrap_or_else(|| default_capture_for_token_type(token_type))
+}
+
+fn default_capture_for_token_type(token_type: &SemanticTokenType) -> &str {
     match token_type {
-        token_type if token_type == &SemanticTokenType::NAMESPACE => CAPTURE_NAMESPACE,
+        token_type if arborium_theme::CAPTURE_NAMES.contains(&token_type.as_str()) => {
+            token_type.as_str()
+        }
         token_type
-            if token_type == &SemanticTokenType::TYPE
-                || token_type == &SemanticTokenType::CLASS
-                || token_type == &SemanticTokenType::ENUM
+            if token_type == &SemanticTokenType::CLASS
                 || token_type == &SemanticTokenType::INTERFACE
                 || token_type == &SemanticTokenType::STRUCT =>
         {
-            CAPTURE_TYPE
+            "type"
         }
-        token_type if token_type == &SemanticTokenType::TYPE_PARAMETER => CAPTURE_TYPE_PARAMETER,
-        token_type if token_type == &SemanticTokenType::PARAMETER => CAPTURE_VARIABLE_PARAMETER,
-        token_type if token_type == &SemanticTokenType::VARIABLE => CAPTURE_VARIABLE,
-        token_type
-            if token_type == &SemanticTokenType::PROPERTY
-                || token_type == &SemanticTokenType::EVENT =>
-        {
-            CAPTURE_PROPERTY
-        }
-        token_type if token_type == &SemanticTokenType::ENUM_MEMBER => CAPTURE_CONSTANT,
-        token_type if token_type == &SemanticTokenType::FUNCTION => CAPTURE_FUNCTION,
-        token_type if token_type == &SemanticTokenType::METHOD => CAPTURE_FUNCTION_METHOD,
-        token_type if token_type == &SemanticTokenType::MACRO => CAPTURE_FUNCTION_MACRO,
-        token_type if token_type == &SemanticTokenType::KEYWORD => CAPTURE_KEYWORD,
-        token_type if token_type == &SemanticTokenType::MODIFIER => CAPTURE_KEYWORD_MODIFIER,
-        token_type if token_type == &SemanticTokenType::COMMENT => CAPTURE_COMMENT,
-        token_type if token_type == &SemanticTokenType::STRING => CAPTURE_STRING,
-        token_type if token_type == &SemanticTokenType::NUMBER => CAPTURE_NUMBER,
-        token_type if token_type == &SemanticTokenType::REGEXP => CAPTURE_STRING_REGEXP,
-        token_type if token_type == &SemanticTokenType::OPERATOR => CAPTURE_OPERATOR,
-        token_type if token_type == &SemanticTokenType::DECORATOR => CAPTURE_ATTRIBUTE,
+        token_type if token_type == &SemanticTokenType::TYPE_PARAMETER => "type.parameter",
+        token_type if token_type == &SemanticTokenType::PARAMETER => "variable.parameter",
+        token_type if token_type == &SemanticTokenType::ENUM => "type.enum",
+        token_type if token_type == &SemanticTokenType::ENUM_MEMBER => "type.enum.variant",
+        token_type if token_type == &SemanticTokenType::MODIFIER => "keyword.modifier",
+        token_type if token_type == &SemanticTokenType::REGEXP => "string.regexp",
+        // NOTE: currently unsupported default lsp token types are 'event' and 'decorator'
         token_type => token_type.as_str(),
     }
 }
@@ -287,10 +309,27 @@ fn utf16_column_to_byte(line: &str, column: u32) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use arborium_theme::ThemeSlot;
+
+use super::*;
 
     const SOURCE: &str = "let 😀 = value;\r\ncall(😀);";
     const SEMANTIC_PATTERN_INDEX: u32 = 42;
+    const CUSTOM_LSP_TOKEN_TYPE: &str = "const";
+    const CUSTOM_CAPTURE: &str = "constant";
+    const CUSTOM_LANGUAGE: &str = "rust";
+    const OTHER_LANGUAGE: &str = "python";
+    const CUSTOM_LANGUAGE_CAPTURE: &str = "constant.rust";
+    const CUSTOM_CAPTURES: &str = r#"
+const = "constant"
+
+[rust]
+const = "constant.rust"
+"#;
+    const LANGUAGE_ONLY_CAPTURES: &str = r#"
+[rust]
+const = "constant"
+"#;
     const THEME_SOURCE: &str = r##"
 name = "Test theme"
 variant = "light"
@@ -318,6 +357,26 @@ mauve = "#010203"
         }
     }
 
+    fn semantic_spans(
+        tokens: &[SemanticToken],
+        legend: &SemanticTokensLegend,
+        language: &str,
+        captures: &CaptureMappings,
+    ) -> Vec<Span> {
+        semantic_tokens_to_spans(
+            SOURCE,
+            tokens,
+            legend,
+            SEMANTIC_PATTERN_INDEX,
+            language,
+            captures,
+        )
+    }
+
+    fn custom_captures() -> CaptureMappings {
+        toml::from_str(CUSTOM_CAPTURES).unwrap()
+    }
+
     #[test]
     fn converts_delta_encoded_utf16_positions_to_byte_spans() {
         let tokens = [token(0, 4, 2, 0), token(0, 5, 5, 1), token(1, 0, 4, 1)];
@@ -326,7 +385,7 @@ mauve = "#010203"
             SemanticTokenType::FUNCTION,
         ]);
 
-        let spans = semantic_tokens_to_spans(SOURCE, &tokens, &legend, SEMANTIC_PATTERN_INDEX);
+        let spans = semantic_spans(&tokens, &legend, CUSTOM_LANGUAGE, &CaptureMappings::new());
 
         assert_eq!(
             spans,
@@ -334,19 +393,19 @@ mauve = "#010203"
                 Span {
                     start: 4,
                     end: 8,
-                    capture: CAPTURE_VARIABLE.to_owned(),
+                    capture: ThemeSlot::Variable.name().unwrap().to_owned(),
                     pattern_index: SEMANTIC_PATTERN_INDEX,
                 },
                 Span {
                     start: 11,
                     end: 16,
-                    capture: CAPTURE_FUNCTION.to_owned(),
+                    capture: ThemeSlot::Function.name().unwrap().to_owned().to_owned(),
                     pattern_index: SEMANTIC_PATTERN_INDEX,
                 },
                 Span {
                     start: 19,
                     end: 23,
-                    capture: CAPTURE_FUNCTION.to_owned(),
+                    capture: ThemeSlot::Function.name().unwrap().to_owned().to_owned(),
                     pattern_index: SEMANTIC_PATTERN_INDEX,
                 },
             ]
@@ -358,9 +417,44 @@ mauve = "#010203"
         let tokens = [token(0, 5, 1, 0), token(0, 4, 2, 1), token(10, 0, 1, 0)];
         let legend = legend(vec![SemanticTokenType::VARIABLE]);
 
-        let spans = semantic_tokens_to_spans(SOURCE, &tokens, &legend, SEMANTIC_PATTERN_INDEX);
+        let spans = semantic_spans(&tokens, &legend, CUSTOM_LANGUAGE, &CaptureMappings::new());
 
         assert!(spans.is_empty());
+    }
+
+    #[test]
+    fn applies_configured_lsp_capture_mapping() {
+        let tokens = [token(0, 0, 3, 0)];
+        let legend = legend(vec![SemanticTokenType::new(CUSTOM_LSP_TOKEN_TYPE)]);
+        let captures = custom_captures();
+
+        let spans = semantic_spans(&tokens, &legend, OTHER_LANGUAGE, &captures);
+
+        assert_eq!(spans[0].capture, CUSTOM_CAPTURE);
+    }
+
+    #[test]
+    fn language_capture_mapping_takes_precedence_over_global_mapping() {
+        let tokens = [token(0, 0, 3, 0)];
+        let legend = legend(vec![SemanticTokenType::new(CUSTOM_LSP_TOKEN_TYPE)]);
+        let captures = custom_captures();
+
+        let spans = semantic_spans(&tokens, &legend, CUSTOM_LANGUAGE, &captures);
+
+        assert_eq!(spans[0].capture, CUSTOM_LANGUAGE_CAPTURE);
+    }
+
+    #[test]
+    fn language_capture_mapping_only_applies_to_that_language() {
+        let tokens = [token(0, 0, 3, 0)];
+        let legend = legend(vec![SemanticTokenType::new(CUSTOM_LSP_TOKEN_TYPE)]);
+        let captures: CaptureMappings = toml::from_str(LANGUAGE_ONLY_CAPTURES).unwrap();
+
+        let language_spans = semantic_spans(&tokens, &legend, CUSTOM_LANGUAGE, &captures);
+        let other_spans = semantic_spans(&tokens, &legend, OTHER_LANGUAGE, &captures);
+
+        assert_eq!(language_spans[0].capture, CUSTOM_CAPTURE);
+        assert_eq!(other_spans[0].capture, CUSTOM_LSP_TOKEN_TYPE);
     }
 
     #[test]
@@ -368,7 +462,7 @@ mauve = "#010203"
         let spans = [Span {
             start: 0,
             end: 1,
-            capture: CAPTURE_VARIABLE.to_owned(),
+            capture: ThemeSlot::Variable.name().unwrap().to_owned().to_owned(),
             pattern_index: SEMANTIC_PATTERN_INDEX,
         }];
 
@@ -382,7 +476,7 @@ mauve = "#010203"
         let spans = vec![Span {
             start: 0,
             end: source.len() as u32,
-            capture: CAPTURE_KEYWORD.to_owned(),
+            capture: ThemeSlot::Keyword.name().unwrap().to_owned().to_owned(),
             pattern_index: 0,
         }];
 
@@ -395,29 +489,29 @@ mauve = "#010203"
     fn debug_output_separates_and_sorts_span_sources() {
         const DEBUG_SOURCE: &str = "let call value";
         let tree_sitter_spans = vec![
-            span(9, 14, CAPTURE_VARIABLE, 1),
-            span(0, 3, CAPTURE_KEYWORD, 0),
+            span(9, 14, ThemeSlot::Variable.name().unwrap(), 1),
+            span(0, 3, ThemeSlot::Keyword.name().unwrap(), 0),
         ];
         let lsp_spans = vec![
-            span(9, 14, CAPTURE_VARIABLE, SEMANTIC_PATTERN_INDEX),
-            span(4, 8, CAPTURE_FUNCTION, SEMANTIC_PATTERN_INDEX),
+            span(9, 14, ThemeSlot::Variable.name().unwrap(), SEMANTIC_PATTERN_INDEX),
+            span(4, 8, ThemeSlot::Function.name().unwrap(), SEMANTIC_PATTERN_INDEX),
         ];
 
         let rendered = render_debug_spans(DEBUG_SOURCE, tree_sitter_spans, lsp_spans);
         let expected = [
             TREE_SITTER_SPANS_HEADING.to_owned(),
-            format!("{:?} {:?}", span(0, 3, CAPTURE_KEYWORD, 0), "let"),
-            format!("{:?} {:?}", span(9, 14, CAPTURE_VARIABLE, 1), "value"),
+            format!("{:?} {:?}", span(0, 3, ThemeSlot::Keyword.name().unwrap(), 0), "let"),
+            format!("{:?} {:?}", span(9, 14, ThemeSlot::Variable.name().unwrap(), 1), "value"),
             String::new(),
             LSP_SPANS_HEADING.to_owned(),
             format!(
                 "{:?} {:?}",
-                span(4, 8, CAPTURE_FUNCTION, SEMANTIC_PATTERN_INDEX),
+                span(4, 8, ThemeSlot::Function.name().unwrap(), SEMANTIC_PATTERN_INDEX),
                 "call"
             ),
             format!(
                 "{:?} {:?}",
-                span(9, 14, CAPTURE_VARIABLE, SEMANTIC_PATTERN_INDEX),
+                span(9, 14, ThemeSlot::Variable.name().unwrap(), SEMANTIC_PATTERN_INDEX),
                 "value"
             ),
         ]

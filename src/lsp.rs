@@ -273,6 +273,7 @@ impl Client {
                 SemanticTokenType::REGEXP,
                 SemanticTokenType::OPERATOR,
                 SemanticTokenType::DECORATOR,
+                SemanticTokenType::new("constant")
             ],
             token_modifiers: vec![
                 SemanticTokenModifier::DECLARATION,

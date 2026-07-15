@@ -55,17 +55,22 @@ struct Cli {
 
 #[derive(serde::Deserialize)]
 struct ConfigRaw {
+    #[serde(default)]
     commands: HashMap<String, String>,
+    #[serde(default)]
+    captures: lighter::CaptureMappings,
 }
 
 struct Config {
     commands: HashMap<lsp::LangName, lsp::CommandEntry>,
+    captures: lighter::CaptureMappings,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
             commands: lsp::default_commands(),
+            captures: lighter::CaptureMappings::new(),
         }
     }
 }
@@ -77,6 +82,12 @@ impl Default for Config {
 /// [commands]
 /// rust = "rust-analyzer"
 /// typescript = "typescript-language-server --stdio"
+///
+/// [captures]
+/// param = "parameter"
+///
+/// [captures.rust]
+/// const = "constant"
 /// ```
 ///
 /// Configured commands update the default commands.
@@ -101,7 +112,10 @@ fn load_config(path: &PathBuf) -> Result<Config> {
             },
         );
     }
-    Ok(Config { commands })
+    Ok(Config {
+        commands,
+        captures: config.captures,
+    })
 }
 
 fn load_custom_theme(path: &PathBuf) -> Result<arborium::theme::Theme> {
@@ -172,10 +186,13 @@ fn main() -> Result<()> {
 
     let source = read_input(cli.file.as_ref())?;
     let lang = resolve_language(cli.lang.as_deref(), cli.file.as_ref())?;
-    let commands = match (cli.no_lsp, cli.config.as_ref()) {
-        (true, _) => HashMap::new(),
-        (false, Some(path)) => load_config(path)?.commands,
-        (false, None) => Config::default().commands,
+    let config = match (cli.no_lsp, cli.config.as_ref()) {
+        (true, _) => Config {
+            commands: HashMap::new(),
+            captures: lighter::CaptureMappings::new(),
+        },
+        (false, Some(path)) => load_config(path)?,
+        (false, None) => Config::default(),
     };
     let theme = match (cli.theme.as_deref(), cli.custom_theme.as_ref()) {
         (Some(name), None) => load_builtin_theme(name)?,
@@ -184,7 +201,7 @@ fn main() -> Result<()> {
         (Some(_), Some(_)) => unreachable!("clap rejects conflicting theme options"),
     };
 
-    let mut registry = lsp::ServerRegistry::new(commands);
+    let mut registry = lsp::ServerRegistry::new(config.commands);
     let output = lighter::highlight(
         &source,
         cli.file.as_deref(),
@@ -195,6 +212,7 @@ fn main() -> Result<()> {
             lsp: !cli.no_lsp,
             tree_sitter: !cli.no_tree_sitter,
             theme,
+            captures: config.captures,
         },
     )?;
 
@@ -209,6 +227,18 @@ mod tests {
     use clap::error::ErrorKind;
 
     const BUILTIN_THEME_NAME: &str = "Dracula";
+    const LSP_CAPTURE_NAME: &str = "const";
+    const HIGHLIGHT_CAPTURE_NAME: &str = "constant";
+    const LANGUAGE_NAME: &str = "rust";
+    const OTHER_LANGUAGE_NAME: &str = "python";
+    const LANGUAGE_CAPTURE_NAME: &str = "constant.rust";
+    const CAPTURE_CONFIG: &str = r#"
+[captures]
+const = "constant"
+
+[captures.rust]
+const = "constant.rust"
+"#;
 
     fn parse_builtin_theme(name: &str) -> clap::error::Result<Cli> {
         Cli::try_parse_from(["lighter", "--theme", name])
@@ -227,5 +257,20 @@ mod tests {
         let error = parse_builtin_theme("unknown").unwrap_err();
 
         assert_eq!(error.kind(), ErrorKind::InvalidValue);
+    }
+
+    #[test]
+    fn parses_capture_mappings_without_commands() {
+        let config: ConfigRaw = toml::from_str(CAPTURE_CONFIG).unwrap();
+
+        assert!(config.commands.is_empty());
+        assert_eq!(
+            config.captures.get(LSP_CAPTURE_NAME, OTHER_LANGUAGE_NAME),
+            Some(HIGHLIGHT_CAPTURE_NAME)
+        );
+        assert_eq!(
+            config.captures.get(LSP_CAPTURE_NAME, LANGUAGE_NAME),
+            Some(LANGUAGE_CAPTURE_NAME)
+        );
     }
 }
