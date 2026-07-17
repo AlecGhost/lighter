@@ -8,6 +8,7 @@ use clap::Parser;
 use clap::builder::PossibleValuesParser;
 
 mod lighter;
+mod logging;
 mod lsp;
 
 #[derive(Parser, Debug)]
@@ -44,7 +45,7 @@ struct Cli {
     #[arg(long, conflicts_with = "theme")]
     custom_theme: Option<PathBuf>,
 
-    /// Output highlighted ANSI, HTML, or debug span lists.
+    /// Output highlighted ANSI or HTML.
     #[arg(short, long, value_enum, default_value_t = lighter::Output::Ansi)]
     format: lighter::Output,
 
@@ -55,6 +56,15 @@ struct Cli {
     /// Disable tree-sitter syntax highlighting.
     #[arg(long)]
     no_tree_sitter: bool,
+
+    /// Set stderr logging verbosity.
+    #[arg(
+        long,
+        value_enum,
+        ignore_case = true,
+        default_value_t = logging::LogLevel::Error
+    )]
+    log: logging::LogLevel,
 }
 
 #[derive(serde::Deserialize)]
@@ -205,7 +215,7 @@ fn main() -> Result<()> {
         (Some(_), Some(_)) => unreachable!("clap rejects conflicting theme options"),
     };
 
-    let mut registry = lsp::ServerRegistry::new(config.commands, cli.project.as_deref())?;
+    let mut registry = lsp::ServerRegistry::new(config.commands, cli.project.as_deref(), cli.log)?;
     let output = lighter::highlight(
         &source,
         cli.file.as_deref(),
@@ -217,6 +227,7 @@ fn main() -> Result<()> {
             tree_sitter: !cli.no_tree_sitter,
             theme,
             captures: config.captures,
+            log: cli.log,
         },
     )?;
 
@@ -246,6 +257,11 @@ const = "constant.rust"
 "#;
     const PROJECT_ARGUMENT: &str = "--project";
     const PROJECT_DIRECTORY: &str = ".";
+    const LOG_ARGUMENT: &str = "--log";
+    const DEBUG_LOG_LEVEL: &str = "DEBUG";
+    const REMOVED_DEBUG_ARGUMENT: &str = "--debug";
+    const DEBUG_FORMAT: &str = "debug";
+    const FORMAT_ARGUMENT: &str = "--format";
 
     fn parse_builtin_theme(name: &str) -> clap::error::Result<Cli> {
         Cli::try_parse_from([CLI_NAME, "--theme", name])
@@ -271,6 +287,29 @@ const = "constant.rust"
         let cli = Cli::try_parse_from([CLI_NAME, PROJECT_ARGUMENT, PROJECT_DIRECTORY]).unwrap();
 
         assert_eq!(cli.project, Some(PathBuf::from(PROJECT_DIRECTORY)));
+    }
+
+    #[test]
+    fn log_level_defaults_to_error_and_accepts_uppercase() {
+        let default_cli = Cli::try_parse_from([CLI_NAME]).unwrap();
+        let debug_cli = Cli::try_parse_from([CLI_NAME, LOG_ARGUMENT, DEBUG_LOG_LEVEL]).unwrap();
+
+        assert_eq!(default_cli.log, logging::LogLevel::Error);
+        assert_eq!(debug_cli.log, logging::LogLevel::Debug);
+    }
+
+    #[test]
+    fn debug_is_not_an_output_format() {
+        let error = Cli::try_parse_from([CLI_NAME, FORMAT_ARGUMENT, DEBUG_FORMAT]).unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::InvalidValue);
+    }
+
+    #[test]
+    fn debug_flag_is_removed() {
+        let error = Cli::try_parse_from([CLI_NAME, REMOVED_DEBUG_ARGUMENT]).unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::UnknownArgument);
     }
 
     #[test]

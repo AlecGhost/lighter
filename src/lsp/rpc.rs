@@ -1,8 +1,9 @@
 use lsp_types::notification::{LogMessage, Notification, Progress, ShowMessage};
 use lsp_types::request::{Request, ShowMessageRequest, WorkDoneProgressCreate};
 use lsp_types::{
-    LogMessageParams, MessageActionItem, ProgressParams, ProgressParamsValue, ProgressToken,
-    ShowMessageParams, ShowMessageRequestParams, WorkDoneProgress, WorkDoneProgressCreateParams,
+    LogMessageParams, MessageActionItem, MessageType, ProgressParams, ProgressParamsValue,
+    ProgressToken, ShowMessageParams, ShowMessageRequestParams, WorkDoneProgress,
+    WorkDoneProgressCreateParams,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -13,6 +14,8 @@ use std::process::{ChildStdin, ChildStdout};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 use thiserror::Error;
+
+use crate::logging::LogLevel;
 
 const JSON_RPC_VERSION: &str = "2.0";
 const CONTENT_LENGTH: &str = "Content-Length";
@@ -43,6 +46,7 @@ pub(crate) struct Connection {
     incoming: Receiver<Result<IncomingMessage>>,
     writer: Box<dyn Write + Send>,
     message_output: Box<dyn Write + Send>,
+    log: LogLevel,
     next_request_id: u64,
     active_progress: HashSet<ProgressToken>,
 }
@@ -106,6 +110,7 @@ impl fmt::Debug for Connection {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("Connection")
+            .field("log", &self.log)
             .field("next_request_id", &self.next_request_id)
             .field("active_progress", &self.active_progress)
             .finish_non_exhaustive()
@@ -113,14 +118,15 @@ impl fmt::Debug for Connection {
 }
 
 impl Connection {
-    pub(crate) fn new(stdout: ChildStdout, stdin: ChildStdin) -> Connection {
-        Self::from_io(stdout, stdin, std::io::stderr())
+    pub(crate) fn new(stdout: ChildStdout, stdin: ChildStdin, log: LogLevel) -> Connection {
+        Self::from_io(stdout, stdin, std::io::stderr(), log)
     }
 
     fn from_io(
         reader: impl Read + Send + 'static,
         writer: impl Write + Send + 'static,
         message_output: impl Write + Send + 'static,
+        log: LogLevel,
     ) -> Connection {
         let (sender, incoming) = mpsc::channel();
         std::thread::spawn(move || {
@@ -138,6 +144,7 @@ impl Connection {
             incoming,
             writer: Box::new(writer),
             message_output: Box::new(message_output),
+            log,
             next_request_id: 1,
             active_progress: HashSet::new(),
         }
@@ -252,11 +259,13 @@ impl Connection {
         match method {
             ShowMessage::METHOD => {
                 let params: ShowMessageParams = serde_json::from_value(message.params)?;
-                self.display_message(&params.message)?;
+                self.display_typed_message(params.typ, &params.message)?;
             }
             LogMessage::METHOD => {
                 let params: LogMessageParams = serde_json::from_value(message.params)?;
-                self.display_message(&params.message)?;
+                if self.log.includes(LogLevel::Debug) {
+                    self.display_message(&params.message)?;
+                }
             }
             Progress::METHOD => {
                 let params: ProgressParams = serde_json::from_value(message.params)?;
@@ -265,7 +274,7 @@ impl Connection {
             ShowMessageRequest::METHOD => {
                 let id = request_id(&message)?.clone();
                 let params: ShowMessageRequestParams = serde_json::from_value(message.params)?;
-                self.display_message(&params.message)?;
+                self.display_typed_message(params.typ, &params.message)?;
                 self.respond(&id, Option::<MessageActionItem>::None)?;
             }
             WorkDoneProgressCreate::METHOD => {
@@ -287,15 +296,23 @@ impl Connection {
         match params.value {
             ProgressParamsValue::WorkDone(WorkDoneProgress::Begin(begin)) => {
                 self.active_progress.insert(params.token);
-                self.display_message(&begin.title)?;
-                self.display_optional_message(begin.message.as_deref())?;
+                if self.log.includes(LogLevel::Info) {
+                    self.display_message(&begin.title)?;
+                }
+                if self.log.includes(LogLevel::Debug) {
+                    self.display_optional_message(begin.message.as_deref())?;
+                }
             }
             ProgressParamsValue::WorkDone(WorkDoneProgress::Report(report)) => {
-                self.display_optional_message(report.message.as_deref())?;
+                if self.log.includes(LogLevel::Debug) {
+                    self.display_optional_message(report.message.as_deref())?;
+                }
             }
             ProgressParamsValue::WorkDone(WorkDoneProgress::End(end)) => {
                 self.active_progress.remove(&params.token);
-                self.display_optional_message(end.message.as_deref())?;
+                if self.log.includes(LogLevel::Debug) {
+                    self.display_optional_message(end.message.as_deref())?;
+                }
             }
         }
         Ok(())
@@ -306,6 +323,13 @@ impl Connection {
             Some(message) => self.display_message(message),
             None => Ok(()),
         }
+    }
+
+    fn display_typed_message(&mut self, typ: MessageType, message: &str) -> Result<()> {
+        if self.log.includes(show_message_level(typ)) {
+            self.display_message(message)?;
+        }
+        Ok(())
     }
 
     fn display_message(&mut self, message: &str) -> Result<()> {
@@ -337,6 +361,14 @@ impl Connection {
                 },
             },
         )
+    }
+}
+
+fn show_message_level(typ: MessageType) -> LogLevel {
+    if typ == MessageType::ERROR || typ == MessageType::WARNING {
+        LogLevel::Warn
+    } else {
+        LogLevel::Info
     }
 }
 
@@ -413,6 +445,8 @@ mod tests {
     const OUTGOING_MESSAGE_COUNT: usize = 3;
     const TEST_REQUEST_METHOD: &str = "test/request";
     const TEST_PAYLOAD_TEXT: &str = "response payload";
+    const ERROR_MESSAGE_TEXT: &str = "error message";
+    const WARNING_MESSAGE_TEXT: &str = "warning message";
     const SHOW_MESSAGE_TEXT: &str = "show notification";
     const LOG_MESSAGE_TEXT: &str = "log notification";
     const SHOW_MESSAGE_REQUEST_TEXT: &str = "show request";
@@ -421,10 +455,15 @@ mod tests {
     const PROGRESS_TITLE: &str = "Analyzing workspace";
     const PROGRESS_BEGIN_MESSAGE: &str = "begin message";
     const PROGRESS_REPORT_MESSAGE: &str = "report message";
+    const SHORT_PROGRESS_REPORT_MESSAGE: &str = "done";
     const OTHER_PROGRESS_END_MESSAGE: &str = "other end message";
     const PROGRESS_END_MESSAGE: &str = "end message";
     const TEST_WAIT_TIMEOUT: Duration = Duration::from_millis(10);
     const TEST_READER_DELAY: Duration = Duration::from_millis(50);
+    const ERROR_LOG_LEVEL: LogLevel = LogLevel::Error;
+    const WARN_LOG_LEVEL: LogLevel = LogLevel::Warn;
+    const INFO_LOG_LEVEL: LogLevel = LogLevel::Info;
+    const DEBUG_LOG_LEVEL: LogLevel = LogLevel::Debug;
 
     #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
     struct Payload {
@@ -535,6 +574,13 @@ mod tests {
         })
     }
 
+    fn show_message(typ: MessageType, message: &str) -> Value {
+        notification::<ShowMessage>(ShowMessageParams {
+            typ,
+            message: message.to_owned(),
+        })
+    }
+
     fn output_lines(lines: &[&str]) -> String {
         format!("{}\n", lines.join("\n"))
     }
@@ -544,6 +590,92 @@ mod tests {
         (0..count)
             .map(|_| read_message(&mut reader).unwrap())
             .collect()
+    }
+
+    fn test_connection(
+        incoming: Vec<u8>,
+        log: LogLevel,
+    ) -> (Connection, SharedBuffer, SharedBuffer) {
+        let protocol_output = SharedBuffer::default();
+        let message_output = SharedBuffer::default();
+        let connection = Connection::from_io(
+            Cursor::new(incoming),
+            protocol_output.clone(),
+            message_output.clone(),
+            log,
+        );
+        (connection, protocol_output, message_output)
+    }
+
+    fn server_message_output(messages: &[Value], log: LogLevel) -> String {
+        let message_output = SharedBuffer::default();
+        let mut connection = Connection::from_io(
+            Cursor::new(Vec::new()),
+            SharedBuffer::default(),
+            message_output.clone(),
+            log,
+        );
+        for message in messages {
+            let incoming = serde_json::from_value(message.clone()).unwrap();
+            assert!(connection.handle_incoming(incoming).unwrap().is_none());
+        }
+        message_output.text()
+    }
+
+    fn progress_notifications() -> Vec<Value> {
+        vec![
+            progress(
+                PROGRESS_TOKEN,
+                WorkDoneProgress::Begin(WorkDoneProgressBegin {
+                    title: PROGRESS_TITLE.to_owned(),
+                    message: Some(PROGRESS_BEGIN_MESSAGE.to_owned()),
+                    ..Default::default()
+                }),
+            ),
+            progress(
+                PROGRESS_TOKEN,
+                WorkDoneProgress::Report(WorkDoneProgressReport {
+                    message: Some(PROGRESS_REPORT_MESSAGE.to_owned()),
+                    ..Default::default()
+                }),
+            ),
+            progress(
+                PROGRESS_TOKEN,
+                WorkDoneProgress::Report(WorkDoneProgressReport {
+                    message: Some(SHORT_PROGRESS_REPORT_MESSAGE.to_owned()),
+                    ..Default::default()
+                }),
+            ),
+            progress(
+                OTHER_PROGRESS_TOKEN,
+                WorkDoneProgress::End(WorkDoneProgressEnd {
+                    message: Some(OTHER_PROGRESS_END_MESSAGE.to_owned()),
+                }),
+            ),
+            progress(
+                PROGRESS_TOKEN,
+                WorkDoneProgress::End(WorkDoneProgressEnd {
+                    message: Some(PROGRESS_END_MESSAGE.to_owned()),
+                }),
+            ),
+        ]
+    }
+
+    fn wait_for_test_progress(log: LogLevel) -> (Connection, String) {
+        let incoming = frames(&progress_notifications());
+        let message_output = SharedBuffer::default();
+        let mut connection = Connection::from_io(
+            DelayedEofReader::new(incoming, TEST_READER_DELAY),
+            SharedBuffer::default(),
+            message_output.clone(),
+            log,
+        );
+
+        connection
+            .wait_for_progress(TEST_WAIT_TIMEOUT, TEST_WAIT_TIMEOUT)
+            .unwrap();
+
+        (connection, message_output.text())
     }
 
     #[test]
@@ -563,7 +695,69 @@ mod tests {
     }
 
     #[test]
-    fn handles_message_notifications_and_server_requests() {
+    fn filters_server_messages_by_log_level() {
+        let messages = [
+            show_message(MessageType::ERROR, ERROR_MESSAGE_TEXT),
+            show_message(MessageType::WARNING, WARNING_MESSAGE_TEXT),
+            show_message(MessageType::INFO, SHOW_MESSAGE_TEXT),
+            notification::<LogMessage>(LogMessageParams {
+                typ: MessageType::LOG,
+                message: LOG_MESSAGE_TEXT.to_owned(),
+            }),
+            progress(
+                PROGRESS_TOKEN,
+                WorkDoneProgress::Begin(WorkDoneProgressBegin {
+                    title: PROGRESS_TITLE.to_owned(),
+                    message: Some(PROGRESS_BEGIN_MESSAGE.to_owned()),
+                    ..Default::default()
+                }),
+            ),
+            progress(
+                PROGRESS_TOKEN,
+                WorkDoneProgress::Report(WorkDoneProgressReport {
+                    message: Some(PROGRESS_REPORT_MESSAGE.to_owned()),
+                    ..Default::default()
+                }),
+            ),
+            progress(
+                PROGRESS_TOKEN,
+                WorkDoneProgress::End(WorkDoneProgressEnd {
+                    message: Some(PROGRESS_END_MESSAGE.to_owned()),
+                }),
+            ),
+        ];
+
+        assert!(server_message_output(&messages, ERROR_LOG_LEVEL).is_empty());
+        assert_eq!(
+            server_message_output(&messages, WARN_LOG_LEVEL),
+            output_lines(&[ERROR_MESSAGE_TEXT, WARNING_MESSAGE_TEXT])
+        );
+        assert_eq!(
+            server_message_output(&messages, INFO_LOG_LEVEL),
+            output_lines(&[
+                ERROR_MESSAGE_TEXT,
+                WARNING_MESSAGE_TEXT,
+                SHOW_MESSAGE_TEXT,
+                PROGRESS_TITLE,
+            ])
+        );
+        assert_eq!(
+            server_message_output(&messages, DEBUG_LOG_LEVEL),
+            output_lines(&[
+                ERROR_MESSAGE_TEXT,
+                WARNING_MESSAGE_TEXT,
+                SHOW_MESSAGE_TEXT,
+                LOG_MESSAGE_TEXT,
+                PROGRESS_TITLE,
+                PROGRESS_BEGIN_MESSAGE,
+                PROGRESS_REPORT_MESSAGE,
+                PROGRESS_END_MESSAGE,
+            ])
+        );
+    }
+
+    #[test]
+    fn handles_message_notifications_and_server_requests_with_debug_enabled() {
         let expected_response = Payload {
             text: TEST_PAYLOAD_TEXT.to_owned(),
         };
@@ -592,13 +786,8 @@ mod tests {
             ),
             client_response(CLIENT_REQUEST_ID, &expected_response),
         ]);
-        let protocol_output = SharedBuffer::default();
-        let message_output = SharedBuffer::default();
-        let mut connection = Connection::from_io(
-            Cursor::new(incoming),
-            protocol_output.clone(),
-            message_output.clone(),
-        );
+        let (mut connection, protocol_output, message_output) =
+            test_connection(incoming, DEBUG_LOG_LEVEL);
 
         let response = connection
             .request::<TestRequest>(Payload {
@@ -625,54 +814,47 @@ mod tests {
     }
 
     #[test]
-    fn waits_for_the_end_notification_matching_a_progress_begin() {
+    fn suppresses_log_messages_below_debug() {
+        let expected_response = Payload {
+            text: TEST_PAYLOAD_TEXT.to_owned(),
+        };
         let incoming = frames(&[
-            progress(
-                PROGRESS_TOKEN,
-                WorkDoneProgress::Begin(WorkDoneProgressBegin {
-                    title: PROGRESS_TITLE.to_owned(),
-                    message: Some(PROGRESS_BEGIN_MESSAGE.to_owned()),
-                    ..Default::default()
-                }),
-            ),
-            progress(
-                PROGRESS_TOKEN,
-                WorkDoneProgress::Report(WorkDoneProgressReport {
-                    message: Some(PROGRESS_REPORT_MESSAGE.to_owned()),
-                    ..Default::default()
-                }),
-            ),
-            progress(
-                OTHER_PROGRESS_TOKEN,
-                WorkDoneProgress::End(WorkDoneProgressEnd {
-                    message: Some(OTHER_PROGRESS_END_MESSAGE.to_owned()),
-                }),
-            ),
-            progress(
-                PROGRESS_TOKEN,
-                WorkDoneProgress::End(WorkDoneProgressEnd {
-                    message: Some(PROGRESS_END_MESSAGE.to_owned()),
-                }),
-            ),
+            notification::<LogMessage>(LogMessageParams {
+                typ: MessageType::LOG,
+                message: LOG_MESSAGE_TEXT.to_owned(),
+            }),
+            client_response(CLIENT_REQUEST_ID, &expected_response),
         ]);
-        let message_output = SharedBuffer::default();
-        let mut connection = Connection::from_io(
-            DelayedEofReader::new(incoming, TEST_READER_DELAY),
-            SharedBuffer::default(),
-            message_output.clone(),
-        );
+        let (mut connection, _, message_output) = test_connection(incoming, INFO_LOG_LEVEL);
 
-        connection
-            .wait_for_progress(TEST_WAIT_TIMEOUT, TEST_WAIT_TIMEOUT)
+        let response = connection
+            .request::<TestRequest>(expected_response.clone())
             .unwrap();
+
+        assert_eq!(response, expected_response);
+        assert!(message_output.text().is_empty());
+    }
+
+    #[test]
+    fn info_waits_for_matching_progress_end_and_only_shows_title() {
+        let (connection, output) = wait_for_test_progress(INFO_LOG_LEVEL);
+
+        assert!(connection.active_progress.is_empty());
+        assert_eq!(output, output_lines(&[PROGRESS_TITLE]));
+    }
+
+    #[test]
+    fn shows_progress_details_with_debug() {
+        let (connection, output) = wait_for_test_progress(DEBUG_LOG_LEVEL);
 
         assert!(connection.active_progress.is_empty());
         assert_eq!(
-            message_output.text(),
+            output,
             output_lines(&[
                 PROGRESS_TITLE,
                 PROGRESS_BEGIN_MESSAGE,
                 PROGRESS_REPORT_MESSAGE,
+                SHORT_PROGRESS_REPORT_MESSAGE,
                 OTHER_PROGRESS_END_MESSAGE,
                 PROGRESS_END_MESSAGE,
             ])

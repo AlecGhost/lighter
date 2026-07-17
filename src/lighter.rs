@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::io::Write;
 use std::path::Path;
 
 use arborium::advanced::{Span, spans_to_ansi, spans_to_html};
@@ -6,6 +7,7 @@ use arborium::theme::{Theme, builtin};
 use lsp_types::{SemanticToken, SemanticTokenType, SemanticTokensLegend};
 use thiserror::Error;
 
+use crate::logging::LogLevel;
 use crate::lsp::{self, LangName};
 
 const TREE_SITTER_SPANS_HEADING: &str = "Tree-sitter spans:";
@@ -49,8 +51,6 @@ pub enum Output {
     #[default]
     Ansi,
     Html,
-    #[value(alias = "spans")]
-    Debug,
 }
 
 pub struct HighlightOptions {
@@ -59,6 +59,7 @@ pub struct HighlightOptions {
     pub tree_sitter: bool,
     pub theme: Theme,
     pub captures: CaptureMappings,
+    pub log: LogLevel,
 }
 
 #[derive(Error, Debug)]
@@ -67,6 +68,8 @@ pub enum Error {
     Arborium(#[from] arborium::Error),
     #[error(transparent)]
     Server(#[from] lsp::Error),
+    #[error("Could not write debug spans: {0}")]
+    DebugOutput(#[source] std::io::Error),
 }
 
 type Result<T> = std::result::Result<T, Error>;
@@ -107,6 +110,15 @@ pub fn highlight(
     } else {
         Vec::new()
     };
+
+    write_debug_spans(
+        &mut std::io::stderr().lock(),
+        input,
+        &tree_sitter_spans,
+        &lsp_spans,
+        options.log,
+    )
+    .map_err(Error::DebugOutput)?;
 
     Ok(render(
         input,
@@ -208,7 +220,6 @@ fn render(
             merge_spans(tree_sitter_spans, lsp_spans),
             &arborium::HtmlFormat::default(),
         ),
-        Output::Debug => render_debug_spans(source, tree_sitter_spans, lsp_spans),
     }
 }
 
@@ -219,15 +230,34 @@ fn merge_spans(mut tree_sitter_spans: Vec<Span>, lsp_spans: Vec<Span>) -> Vec<Sp
 
 fn render_debug_spans(
     source: &str,
-    mut tree_sitter_spans: Vec<Span>,
-    mut lsp_spans: Vec<Span>,
+    tree_sitter_spans: &[Span],
+    lsp_spans: &[Span],
 ) -> String {
+    let mut tree_sitter_spans = tree_sitter_spans.to_vec();
+    let mut lsp_spans = lsp_spans.to_vec();
     sort_spans_by_position(&mut tree_sitter_spans);
     sort_spans_by_position(&mut lsp_spans);
 
     let tree_sitter_lines = format_span_lines(source, &tree_sitter_spans);
     let lsp_lines = format_span_lines(source, &lsp_spans);
     format!("{TREE_SITTER_SPANS_HEADING}\n{tree_sitter_lines}\n\n{LSP_SPANS_HEADING}\n{lsp_lines}")
+}
+
+fn write_debug_spans(
+    writer: &mut impl Write,
+    source: &str,
+    tree_sitter_spans: &[Span],
+    lsp_spans: &[Span],
+    log: LogLevel,
+) -> std::io::Result<()> {
+    if log.includes(LogLevel::Debug) {
+        writeln!(
+            writer,
+            "{}",
+            render_debug_spans(source, tree_sitter_spans, lsp_spans)
+        )?;
+    }
+    Ok(())
 }
 
 fn sort_spans_by_position(spans: &mut [Span]) {
@@ -486,7 +516,7 @@ mauve = "#010203"
     }
 
     #[test]
-    fn debug_output_separates_and_sorts_span_sources() {
+    fn debug_logging_separates_and_sorts_span_sources() {
         const DEBUG_SOURCE: &str = "let call value";
         let tree_sitter_spans = vec![
             span(9, 14, ThemeSlot::Variable.name().unwrap(), 1),
@@ -497,7 +527,6 @@ mauve = "#010203"
             span(4, 8, ThemeSlot::Function.name().unwrap(), SEMANTIC_PATTERN_INDEX),
         ];
 
-        let rendered = render_debug_spans(DEBUG_SOURCE, tree_sitter_spans, lsp_spans);
         let expected = [
             TREE_SITTER_SPANS_HEADING.to_owned(),
             format!("{:?} {:?}", span(0, 3, ThemeSlot::Keyword.name().unwrap(), 0), "let"),
@@ -517,7 +546,27 @@ mauve = "#010203"
         ]
         .join("\n");
 
-        assert_eq!(rendered, expected);
+        let mut info_output = Vec::new();
+        write_debug_spans(
+            &mut info_output,
+            DEBUG_SOURCE,
+            &tree_sitter_spans,
+            &lsp_spans,
+            LogLevel::Info,
+        )
+        .unwrap();
+        let mut debug_output = Vec::new();
+        write_debug_spans(
+            &mut debug_output,
+            DEBUG_SOURCE,
+            &tree_sitter_spans,
+            &lsp_spans,
+            LogLevel::Debug,
+        )
+        .unwrap();
+
+        assert!(info_output.is_empty());
+        assert_eq!(String::from_utf8(debug_output).unwrap(), format!("{expected}\n"));
     }
 
     fn span(start: u32, end: u32, capture: &str, pattern_index: u32) -> Span {

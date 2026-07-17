@@ -23,6 +23,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use thiserror::Error;
 
+use crate::logging::LogLevel;
+
 pub type LangName = Rc<str>;
 
 const FILE_URI_PREFIX: &str = "file://";
@@ -113,13 +115,19 @@ pub struct ServerRegistry {
     clients: HashMap<LangName, Client>,
     commands: HashMap<LangName, CommandEntry>,
     project: Option<Project>,
+    log: LogLevel,
 }
 
 impl ServerRegistry {
-    pub fn new(commands: HashMap<LangName, CommandEntry>, project: Option<&Path>) -> Result<Self> {
+    pub fn new(
+        commands: HashMap<LangName, CommandEntry>,
+        project: Option<&Path>,
+        log: LogLevel,
+    ) -> Result<Self> {
         Ok(ServerRegistry {
             commands,
             project: project.map(Project::new).transpose()?,
+            log,
             ..Default::default()
         })
     }
@@ -129,7 +137,7 @@ impl<'a> ServerRegistry {
     pub fn get_server(&'a mut self, lang: LangName) -> Result<Server<'a>> {
         if !self.clients.contains_key(&lang) {
             if let Some(command_entry) = self.commands.get(&lang) {
-                let client = Client::new(command_entry, &lang, self.project.as_ref())?;
+                let client = Client::new(command_entry, &lang, self.project.as_ref(), self.log)?;
                 self.clients.insert(lang.clone(), client);
             } else {
                 return Err(Error::NoServer(lang.to_string()));
@@ -239,8 +247,9 @@ impl Client {
         command_entry: &CommandEntry,
         language: &str,
         project: Option<&Project>,
+        log: LogLevel,
     ) -> Result<Client> {
-        let mut connection = Client::spawn_server(command_entry, project)?;
+        let mut connection = Client::spawn_server(command_entry, project, log)?;
         let semantic_tokens_legend = match Client::initialize(&mut connection.rpc, project) {
             Ok(legend) => legend,
             Err(error) => {
@@ -257,7 +266,11 @@ impl Client {
         })
     }
 
-    fn spawn_server(command_entry: &CommandEntry, project: Option<&Project>) -> Result<Connection> {
+    fn spawn_server(
+        command_entry: &CommandEntry,
+        project: Option<&Project>,
+        log: LogLevel,
+    ) -> Result<Connection> {
         let mut command = server_command(command_entry, project);
         let mut child = command
             .stdin(Stdio::piped())
@@ -277,7 +290,7 @@ impl Client {
 
         Ok(Connection {
             child,
-            rpc: rpc::Connection::new(stdout, stdin),
+            rpc: rpc::Connection::new(stdout, stdin, log),
         })
     }
 
