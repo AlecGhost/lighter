@@ -32,8 +32,8 @@ const TEMP_FILE_PREFIX: &str = "lighter";
 const DEFAULT_DOCUMENT_EXTENSION: &str = "txt";
 const MAX_TEMP_FILE_ATTEMPTS: usize = 100;
 const URI_HEX_DIGITS: &[u8; 16] = b"0123456789ABCDEF";
-const DOCUMENT_OPEN_WAIT_TIMEOUT: Duration = Duration::from_secs(1);
-const PROGRESS_END_WAIT_TIMEOUT: Duration = Duration::from_secs(10);
+const DOCUMENT_OPEN_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
+const PROGRESS_END_WAIT_TIMEOUT: Duration = Duration::from_secs(15);
 
 static NEXT_TEMP_FILE_ID: AtomicUsize = AtomicUsize::new(0);
 
