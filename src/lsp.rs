@@ -8,8 +8,8 @@ use lsp_types::{
     SemanticTokenType, SemanticTokensClientCapabilities, SemanticTokensClientCapabilitiesRequests,
     SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensParams, SemanticTokensResult,
     SemanticTokensServerCapabilities, TextDocumentClientCapabilities, TextDocumentIdentifier,
-    TextDocumentItem, TokenFormat, Uri, WorkDoneProgressParams, WorkspaceClientCapabilities,
-    WorkspaceFolder,
+    TextDocumentItem, TokenFormat, Uri, WindowClientCapabilities, WorkDoneProgressParams,
+    WorkspaceClientCapabilities, WorkspaceFolder,
 };
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
@@ -20,6 +20,7 @@ use std::rc::Rc;
 use std::str::FromStr;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 use thiserror::Error;
 
 pub type LangName = Rc<str>;
@@ -29,6 +30,8 @@ const TEMP_FILE_PREFIX: &str = "lighter";
 const DEFAULT_DOCUMENT_EXTENSION: &str = "txt";
 const MAX_TEMP_FILE_ATTEMPTS: usize = 100;
 const URI_HEX_DIGITS: &[u8; 16] = b"0123456789ABCDEF";
+const DOCUMENT_OPEN_WAIT_TIMEOUT: Duration = Duration::from_secs(1);
+const PROGRESS_END_WAIT_TIMEOUT: Duration = Duration::from_secs(10);
 
 static NEXT_TEMP_FILE_ID: AtomicUsize = AtomicUsize::new(0);
 
@@ -314,6 +317,9 @@ impl Client {
                     text.to_string(),
                 ),
             })?;
+        connection
+            .rpc
+            .wait_for_progress(DOCUMENT_OPEN_WAIT_TIMEOUT, PROGRESS_END_WAIT_TIMEOUT)?;
 
         let token_result = connection
             .rpc
@@ -395,6 +401,11 @@ fn initialize_params(project: Option<&Project>) -> InitializeParams {
     InitializeParams {
         process_id: Some(std::process::id()),
         capabilities: ClientCapabilities {
+            window: Some(WindowClientCapabilities {
+                work_done_progress: Some(true),
+                show_message: Some(Default::default()),
+                ..Default::default()
+            }),
             text_document: Some(TextDocumentClientCapabilities {
                 semantic_tokens: Some(semantic_tokens),
                 ..Default::default()
@@ -572,6 +583,15 @@ mod tests {
                 .token_types[0],
             SemanticTokenType::FUNCTION
         );
+    }
+
+    #[test]
+    fn client_advertises_window_message_and_progress_support() {
+        let params = initialize_params(None);
+        let window = params.capabilities.window.unwrap();
+
+        assert_eq!(window.work_done_progress, Some(true));
+        assert!(window.show_message.is_some());
     }
 
     #[test]
