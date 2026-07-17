@@ -8,7 +8,8 @@ use lsp_types::{
     SemanticTokenType, SemanticTokensClientCapabilities, SemanticTokensClientCapabilitiesRequests,
     SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensParams, SemanticTokensResult,
     SemanticTokensServerCapabilities, TextDocumentClientCapabilities, TextDocumentIdentifier,
-    TextDocumentItem, TokenFormat, Uri, WorkDoneProgressParams,
+    TextDocumentItem, TokenFormat, Uri, WorkDoneProgressParams, WorkspaceClientCapabilities,
+    WorkspaceFolder,
 };
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
@@ -41,6 +42,8 @@ pub enum Error {
     Io(#[from] std::io::Error),
     #[error("Could not create a file URI for document path '{0}'")]
     InvalidDocumentUri(PathBuf),
+    #[error("Project path is not a directory: '{0}'")]
+    InvalidProjectDirectory(PathBuf),
     #[error(transparent)]
     Rpc(#[from] rpc::Error),
 }
@@ -106,14 +109,16 @@ pub fn default_commands() -> HashMap<LangName, CommandEntry> {
 pub struct ServerRegistry {
     clients: HashMap<LangName, Client>,
     commands: HashMap<LangName, CommandEntry>,
+    project: Option<Project>,
 }
 
 impl ServerRegistry {
-    pub fn new(commands: HashMap<LangName, CommandEntry>) -> ServerRegistry {
-        ServerRegistry {
+    pub fn new(commands: HashMap<LangName, CommandEntry>, project: Option<&Path>) -> Result<Self> {
+        Ok(ServerRegistry {
             commands,
+            project: project.map(Project::new).transpose()?,
             ..Default::default()
-        }
+        })
     }
 }
 
@@ -121,7 +126,7 @@ impl<'a> ServerRegistry {
     pub fn get_server(&'a mut self, lang: LangName) -> Result<Server<'a>> {
         if !self.clients.contains_key(&lang) {
             if let Some(command_entry) = self.commands.get(&lang) {
-                let client = Client::new(command_entry, &lang)?;
+                let client = Client::new(command_entry, &lang, self.project.as_ref())?;
                 self.clients.insert(lang.clone(), client);
             } else {
                 return Err(Error::NoServer(lang.to_string()));
@@ -129,6 +134,32 @@ impl<'a> ServerRegistry {
         }
         let client = self.clients.get(&lang).expect("Client was initialized");
         Ok(Server { client })
+    }
+}
+
+#[derive(Debug)]
+struct Project {
+    path: PathBuf,
+    folder: WorkspaceFolder,
+}
+
+impl Project {
+    fn new(path: &Path) -> Result<Self> {
+        let path = fs::canonicalize(path)?;
+        if !path.is_dir() {
+            return Err(Error::InvalidProjectDirectory(path));
+        }
+
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.display().to_string());
+        let folder = WorkspaceFolder {
+            uri: file_uri(&path)?,
+            name,
+        };
+
+        Ok(Self { path, folder })
     }
 }
 
@@ -201,9 +232,13 @@ struct Client {
 }
 
 impl Client {
-    fn new(command_entry: &CommandEntry, language: &str) -> Result<Client> {
-        let mut connection = Client::spawn_server(command_entry)?;
-        let semantic_tokens_legend = match Client::initialize(&mut connection.rpc) {
+    fn new(
+        command_entry: &CommandEntry,
+        language: &str,
+        project: Option<&Project>,
+    ) -> Result<Client> {
+        let mut connection = Client::spawn_server(command_entry, project)?;
+        let semantic_tokens_legend = match Client::initialize(&mut connection.rpc, project) {
             Ok(legend) => legend,
             Err(error) => {
                 let _ = connection.child.kill();
@@ -219,9 +254,9 @@ impl Client {
         })
     }
 
-    fn spawn_server(command_entry: &CommandEntry) -> Result<Connection> {
-        let mut child = Command::new(&command_entry.command)
-            .args(&command_entry.args)
+    fn spawn_server(command_entry: &CommandEntry, project: Option<&Project>) -> Result<Connection> {
+        let mut command = server_command(command_entry, project);
+        let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -243,68 +278,11 @@ impl Client {
         })
     }
 
-    fn initialize(connection: &mut rpc::Connection) -> Result<Option<SemanticTokensLegend>> {
-        let semantic_tokens = SemanticTokensClientCapabilities {
-            requests: SemanticTokensClientCapabilitiesRequests {
-                range: Some(false),
-                full: Some(SemanticTokensFullOptions::Bool(true)),
-            },
-            token_types: vec![
-                SemanticTokenType::NAMESPACE,
-                SemanticTokenType::TYPE,
-                SemanticTokenType::CLASS,
-                SemanticTokenType::ENUM,
-                SemanticTokenType::INTERFACE,
-                SemanticTokenType::STRUCT,
-                SemanticTokenType::TYPE_PARAMETER,
-                SemanticTokenType::PARAMETER,
-                SemanticTokenType::VARIABLE,
-                SemanticTokenType::PROPERTY,
-                SemanticTokenType::ENUM_MEMBER,
-                SemanticTokenType::EVENT,
-                SemanticTokenType::FUNCTION,
-                SemanticTokenType::METHOD,
-                SemanticTokenType::MACRO,
-                SemanticTokenType::KEYWORD,
-                SemanticTokenType::MODIFIER,
-                SemanticTokenType::COMMENT,
-                SemanticTokenType::STRING,
-                SemanticTokenType::NUMBER,
-                SemanticTokenType::REGEXP,
-                SemanticTokenType::OPERATOR,
-                SemanticTokenType::DECORATOR,
-                SemanticTokenType::new("constant")
-            ],
-            token_modifiers: vec![
-                SemanticTokenModifier::DECLARATION,
-                SemanticTokenModifier::DEFINITION,
-                SemanticTokenModifier::READONLY,
-                SemanticTokenModifier::STATIC,
-                SemanticTokenModifier::DEPRECATED,
-                SemanticTokenModifier::ABSTRACT,
-                SemanticTokenModifier::ASYNC,
-                SemanticTokenModifier::MODIFICATION,
-                SemanticTokenModifier::DOCUMENTATION,
-                SemanticTokenModifier::DEFAULT_LIBRARY,
-            ],
-            formats: vec![TokenFormat::RELATIVE],
-            ..Default::default()
-        };
-
-        #[allow(deprecated)]
-        let params = InitializeParams {
-            process_id: Some(std::process::id()),
-            capabilities: ClientCapabilities {
-                text_document: Some(TextDocumentClientCapabilities {
-                    semantic_tokens: Some(semantic_tokens),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-
-        let result = connection.request::<Initialize>(params)?;
+    fn initialize(
+        connection: &mut rpc::Connection,
+        project: Option<&Project>,
+    ) -> Result<Option<SemanticTokensLegend>> {
+        let result = connection.request::<Initialize>(initialize_params(project))?;
         connection.notify::<Initialized>(InitializedParams {})?;
 
         Ok(result
@@ -363,6 +341,83 @@ impl Client {
             (Ok(tokens), Ok(())) => Ok(tokens.map(|tokens| (tokens, legend))),
         }
     }
+}
+
+fn initialize_params(project: Option<&Project>) -> InitializeParams {
+    let semantic_tokens = SemanticTokensClientCapabilities {
+        requests: SemanticTokensClientCapabilitiesRequests {
+            range: Some(false),
+            full: Some(SemanticTokensFullOptions::Bool(true)),
+        },
+        token_types: vec![
+            SemanticTokenType::NAMESPACE,
+            SemanticTokenType::TYPE,
+            SemanticTokenType::CLASS,
+            SemanticTokenType::ENUM,
+            SemanticTokenType::INTERFACE,
+            SemanticTokenType::STRUCT,
+            SemanticTokenType::TYPE_PARAMETER,
+            SemanticTokenType::PARAMETER,
+            SemanticTokenType::VARIABLE,
+            SemanticTokenType::PROPERTY,
+            SemanticTokenType::ENUM_MEMBER,
+            SemanticTokenType::EVENT,
+            SemanticTokenType::FUNCTION,
+            SemanticTokenType::METHOD,
+            SemanticTokenType::MACRO,
+            SemanticTokenType::KEYWORD,
+            SemanticTokenType::MODIFIER,
+            SemanticTokenType::COMMENT,
+            SemanticTokenType::STRING,
+            SemanticTokenType::NUMBER,
+            SemanticTokenType::REGEXP,
+            SemanticTokenType::OPERATOR,
+            SemanticTokenType::DECORATOR,
+            SemanticTokenType::new("constant"),
+        ],
+        token_modifiers: vec![
+            SemanticTokenModifier::DECLARATION,
+            SemanticTokenModifier::DEFINITION,
+            SemanticTokenModifier::READONLY,
+            SemanticTokenModifier::STATIC,
+            SemanticTokenModifier::DEPRECATED,
+            SemanticTokenModifier::ABSTRACT,
+            SemanticTokenModifier::ASYNC,
+            SemanticTokenModifier::MODIFICATION,
+            SemanticTokenModifier::DOCUMENTATION,
+            SemanticTokenModifier::DEFAULT_LIBRARY,
+        ],
+        formats: vec![TokenFormat::RELATIVE],
+        ..Default::default()
+    };
+
+    #[allow(deprecated)]
+    InitializeParams {
+        process_id: Some(std::process::id()),
+        capabilities: ClientCapabilities {
+            text_document: Some(TextDocumentClientCapabilities {
+                semantic_tokens: Some(semantic_tokens),
+                ..Default::default()
+            }),
+            workspace: project.map(|_| WorkspaceClientCapabilities {
+                workspace_folders: Some(true),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        root_uri: project.map(|project| project.folder.uri.clone()),
+        workspace_folders: project.map(|project| vec![project.folder.clone()]),
+        ..Default::default()
+    }
+}
+
+fn server_command(command_entry: &CommandEntry, project: Option<&Project>) -> Command {
+    let mut command = Command::new(&command_entry.command);
+    command.args(&command_entry.args);
+    if let Some(project) = project {
+        command.current_dir(&project.path);
+    }
+    command
 }
 
 fn create_temporary_document(text: &str, language: &str) -> Result<TemporaryDocument> {
@@ -476,7 +531,20 @@ mod tests {
     use super::*;
     use lsp_types::{SemanticTokensOptions, WorkDoneProgressOptions};
 
+    const TEST_ARGUMENT: &str = "--stdio";
+    const TEST_COMMAND: &str = "language-server";
     const TEST_SOURCE: &str = "fn main() {}";
+
+    fn test_project() -> Project {
+        Project::new(&std::env::temp_dir()).unwrap()
+    }
+
+    fn test_command_entry() -> CommandEntry {
+        CommandEntry {
+            command: TEST_COMMAND.to_owned(),
+            args: vec![TEST_ARGUMENT.to_owned()],
+        }
+    }
 
     #[test]
     fn semantic_tokens_require_full_document_support() {
@@ -529,5 +597,34 @@ mod tests {
 
         drop(document);
         assert!(!path.exists());
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn project_configures_server_process_and_lsp_workspace() {
+        let project = test_project();
+        let command = server_command(&test_command_entry(), Some(&project));
+        let params = initialize_params(Some(&project));
+        let workspace = params.capabilities.workspace.as_ref().unwrap();
+        let folders = params.workspace_folders.as_ref().unwrap();
+
+        assert_eq!(command.get_program(), TEST_COMMAND);
+        assert_eq!(command.get_args().collect::<Vec<_>>(), [TEST_ARGUMENT]);
+        assert_eq!(command.get_current_dir(), Some(project.path.as_path()));
+        assert_eq!(params.root_uri.as_ref(), Some(&project.folder.uri));
+        assert_eq!(folders, std::slice::from_ref(&project.folder));
+        assert_eq!(workspace.workspace_folders, Some(true));
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn server_has_no_workspace_without_project() {
+        let command = server_command(&test_command_entry(), None);
+        let params = initialize_params(None);
+
+        assert_eq!(command.get_current_dir(), None);
+        assert!(params.root_uri.is_none());
+        assert!(params.workspace_folders.is_none());
+        assert!(params.capabilities.workspace.is_none());
     }
 }

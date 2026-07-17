@@ -16,6 +16,10 @@ struct Cli {
     /// Source file to highlight (reads stdin when omitted).
     file: Option<PathBuf>,
 
+    /// Project directory exposed to the language server as its workspace.
+    #[arg(long, value_name = "DIR")]
+    project: Option<PathBuf>,
+
     /// Language name (e.g. "rust", "python").
     /// Inferred from file extension if a file path is provided.
     #[arg(short, long)]
@@ -201,7 +205,7 @@ fn main() -> Result<()> {
         (Some(_), Some(_)) => unreachable!("clap rejects conflicting theme options"),
     };
 
-    let mut registry = lsp::ServerRegistry::new(config.commands);
+    let mut registry = lsp::ServerRegistry::new(config.commands, cli.project.as_deref())?;
     let output = lighter::highlight(
         &source,
         cli.file.as_deref(),
@@ -227,6 +231,7 @@ mod tests {
     use clap::error::ErrorKind;
 
     const BUILTIN_THEME_NAME: &str = "Dracula";
+    const CLI_NAME: &str = "lighter";
     const LSP_CAPTURE_NAME: &str = "const";
     const HIGHLIGHT_CAPTURE_NAME: &str = "constant";
     const LANGUAGE_NAME: &str = "rust";
@@ -239,9 +244,11 @@ const = "constant"
 [captures.rust]
 const = "constant.rust"
 "#;
+    const PROJECT_ARGUMENT: &str = "--project";
+    const PROJECT_DIRECTORY: &str = ".";
 
     fn parse_builtin_theme(name: &str) -> clap::error::Result<Cli> {
-        Cli::try_parse_from(["lighter", "--theme", name])
+        Cli::try_parse_from([CLI_NAME, "--theme", name])
     }
 
     #[test]
@@ -257,6 +264,13 @@ const = "constant.rust"
         let error = parse_builtin_theme("unknown").unwrap_err();
 
         assert_eq!(error.kind(), ErrorKind::InvalidValue);
+    }
+
+    #[test]
+    fn parses_project_directory() {
+        let cli = Cli::try_parse_from([CLI_NAME, PROJECT_ARGUMENT, PROJECT_DIRECTORY]).unwrap();
+
+        assert_eq!(cli.project, Some(PathBuf::from(PROJECT_DIRECTORY)));
     }
 
     #[test]
