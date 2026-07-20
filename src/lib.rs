@@ -14,6 +14,14 @@ pub mod lsp;
 
 const TREE_SITTER_SPANS_HEADING: &str = "Tree-sitter spans:";
 const LSP_SPANS_HEADING: &str = "LSP spans:";
+const HTML_HIGHLIGHT_PREFIX: &str = "<a-";
+const HTML_ENTITIES: [(&str, &str); 5] = [
+    ("&lt;", "<"),
+    ("&gt;", ">"),
+    ("&quot;", "\""),
+    ("&#39;", "'"),
+    ("&amp;", "&"),
+];
 
 pub type LangName = Rc<str>;
 
@@ -71,6 +79,12 @@ pub enum Output {
     #[default]
     Ansi,
     Html,
+    /// LaTeX commands intended for an `xcolor`-enabled FancyVerb `Verbatim`
+    /// environment using `commandchars=\\\{\}`.
+    ///
+    /// FancyVerb keeps code characters such as `#`, `%`, `$`, `&`, `_`, `~`,
+    /// and `^` verbatim; only its command and group characters are escaped.
+    Latex,
 }
 
 #[derive(Debug)]
@@ -79,6 +93,13 @@ pub struct HighlightOptions {
     pub tree_sitter: bool,
     pub theme: Theme,
     pub lines: Option<LineRange>,
+    /// Command character configured through FancyVerb's `commandchars` option.
+    ///
+    /// `None` uses FancyVerb's conventional backslash command character. For
+    /// example, `Some('§')` produces output for `commandchars=§\{\}`. This
+    /// output targets a verbatim environment, not ordinary LaTeX text, so other
+    /// LaTeX metacharacters remain unchanged.
+    pub latex_delimiter: Option<char>,
 }
 
 impl Default for HighlightOptions {
@@ -88,6 +109,7 @@ impl Default for HighlightOptions {
             theme: arborium_theme::builtin::catppuccin_mocha(),
             tree_sitter: true,
             lines: None,
+            latex_delimiter: None,
         }
     }
 }
@@ -165,6 +187,7 @@ impl Highlighter {
             self.options.output,
             &self.options.theme,
             self.options.lines,
+            self.options.latex_delimiter,
         ))
     }
 }
@@ -185,6 +208,7 @@ fn render(
     output: Output,
     theme: &Theme,
     lines: Option<LineRange>,
+    latex_delimiter: Option<char>,
 ) -> String {
     let spans = merge_spans(tree_sitter_spans, lsp_spans);
     let (source, spans) = match lines {
@@ -194,7 +218,96 @@ fn render(
     match output {
         Output::Ansi => spans_to_ansi(source, spans, theme),
         Output::Html => spans_to_html(source, spans, &arborium::HtmlFormat::default()),
+        Output::Latex => spans_to_latex(source, spans, theme, latex_delimiter),
     }
+}
+
+fn spans_to_latex(
+    source: &str,
+    spans: Vec<Span>,
+    theme: &Theme,
+    delimiter: Option<char>,
+) -> String {
+    let html = spans_to_html(source, spans, &arborium::HtmlFormat::default());
+    let command = delimiter.unwrap_or('\\');
+    html.split(HTML_HIGHLIGHT_PREFIX).enumerate().fold(
+        String::with_capacity(html.len()),
+        |mut latex, (index, fragment)| {
+            match index {
+                0 => write_latex_text(&mut latex, fragment, command),
+                _ => match split_html_highlight(fragment) {
+                    Some((tag, content, trailing)) => {
+                        let style = arborium_theme::tag_to_name(tag)
+                            .map(arborium_theme::capture_to_slot)
+                            .and_then(arborium_theme::slot_to_highlight_index)
+                            .and_then(|index| theme.style(index));
+                        let groups =
+                            style.map_or(0, |style| write_latex_style(&mut latex, style, command));
+                        write_latex_text(&mut latex, content, command);
+                        latex.extend(std::iter::repeat_n('}', groups));
+                        write_latex_text(&mut latex, trailing, command);
+                    }
+                    None => {
+                        write_latex_text(&mut latex, HTML_HIGHLIGHT_PREFIX, command);
+                        write_latex_text(&mut latex, fragment, command);
+                    }
+                },
+            }
+            latex
+        },
+    )
+}
+
+fn split_html_highlight(fragment: &str) -> Option<(&str, &str, &str)> {
+    let (tag, content) = fragment.split_once('>')?;
+    let closing_tag = format!("</a-{tag}>");
+    let end = content.find(&closing_tag)?;
+    Some((tag, &content[..end], &content[end + closing_tag.len()..]))
+}
+
+fn write_latex_style(output: &mut String, style: &arborium::theme::Style, command: char) -> usize {
+    let mut groups = 0;
+    if let Some(color) = style.fg {
+        output.push(command);
+        output.push_str("textcolor[RGB]{");
+        output.push_str(&format!("{},{},{}", color.r, color.g, color.b));
+        output.push_str("}{");
+        groups += 1;
+    }
+
+    [
+        (style.modifiers.bold, "textbf{"),
+        (style.modifiers.italic, "textit{"),
+        (style.modifiers.underline, "underline{"),
+        (style.modifiers.strikethrough, "sout{"),
+    ]
+    .into_iter()
+    .filter(|(enabled, _)| *enabled)
+    .for_each(|(_, latex_command)| {
+        output.push(command);
+        output.push_str(latex_command);
+        groups += 1;
+    });
+    groups
+}
+
+fn write_latex_text(output: &mut String, html: &str, command: char) {
+    HTML_ENTITIES
+        .into_iter()
+        .fold(html.to_owned(), |text, (entity, character)| {
+            text.replace(entity, character)
+        })
+        .chars()
+        .for_each(|character| match character {
+            '{' | '}' => {
+                output.push(command);
+                output.push(character);
+            }
+            character if character == command => {
+                output.extend([command, command]);
+            }
+            character => output.push(character),
+        });
 }
 
 fn select_lines(source: &str, spans: Vec<Span>, lines: LineRange) -> (&str, Vec<Span>) {
@@ -304,20 +417,57 @@ variant = "light"
 mauve = "#010203"
 "##;
 
-    #[test]
-    fn applies_parsed_theme_colors() {
+    fn render_keyword(
+        source: &str,
+        range: Range<usize>,
+        output: Output,
+        latex_delimiter: Option<char>,
+    ) -> String {
         let theme = Theme::from_toml(THEME_SOURCE).unwrap();
-        let source = "let";
         let spans = vec![Span {
-            start: 0,
-            end: source.len() as u32,
+            start: range.start as u32,
+            end: range.end as u32,
             capture: ThemeSlot::Keyword.name().unwrap().to_owned(),
             pattern_index: 0,
         }];
 
-        let rendered = render(source, spans, Vec::new(), Output::Ansi, &theme, None);
+        render(
+            source,
+            spans,
+            Vec::new(),
+            output,
+            &theme,
+            None,
+            latex_delimiter,
+        )
+    }
+
+    #[test]
+    fn applies_parsed_theme_colors() {
+        let source = "let";
+        let rendered = render_keyword(source, 0..source.len(), Output::Ansi, None);
 
         assert!(rendered.contains("\u{1b}[38;2;1;2;3m"));
+    }
+
+    #[test]
+    fn renders_latex_metacharacters_and_utf8_without_corruption() {
+        const SOURCE: &str = r#"\{}<>#%$&_~^"'😀"#;
+        const EXPECTED: &str = r##"\textcolor[RGB]{1,2,3}{\\\{\}<>#%$&_~^"'😀}"##;
+
+        let rendered = render_keyword(SOURCE, 0..SOURCE.len(), Output::Latex, None);
+
+        assert_eq!(rendered, EXPECTED);
+    }
+
+    #[test]
+    fn renders_latex_with_a_custom_fancyverb_command_character() {
+        const SOURCE: &str = r"\{}";
+        const EXPECTED: &str = r"§textcolor[RGB]{1,2,3}{\§{§}}";
+
+        let rendered = render_keyword(SOURCE, 0..SOURCE.len(), Output::Latex, Some('§'));
+
+        assert_eq!(rendered, EXPECTED);
     }
 
     #[test]
@@ -410,17 +560,20 @@ mauve = "#010203"
         const SOURCE: &str = "first\nsecond\nthird";
         let theme = Theme::from_toml(THEME_SOURCE).unwrap();
 
-        [Output::Ansi, Output::Html].into_iter().for_each(|output| {
-            let rendered = render(
-                SOURCE,
-                Vec::new(),
-                Vec::new(),
-                output,
-                &theme,
-                Some("2:2".parse().unwrap()),
-            );
-            assert_eq!(rendered, "second");
-        });
+        [Output::Ansi, Output::Html, Output::Latex]
+            .into_iter()
+            .for_each(|output| {
+                let rendered = render(
+                    SOURCE,
+                    Vec::new(),
+                    Vec::new(),
+                    output,
+                    &theme,
+                    Some("2:2".parse().unwrap()),
+                    None,
+                );
+                assert_eq!(rendered, "second");
+            });
     }
 
     fn assert_ordered(text: &str, first: &str, second: &str) {
