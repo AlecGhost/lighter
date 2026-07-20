@@ -30,7 +30,7 @@ struct CliInterface {
     lang: Option<String>,
 
     /// Path to a TOML config file
-    /// that maps language names to LSP server commands.
+    /// that configures the theme and maps language names to LSP server commands.
     /// Falls back to built-in defaults when omitted.
     #[arg(short, long)]
     config: Option<PathBuf>,
@@ -145,6 +145,9 @@ enum Error {
 /// Raw config maps directly to how the TOML is structured
 #[derive(serde::Deserialize)]
 struct RawConfig {
+    /// Theme to use, either by built-in name or by path to a TOML theme file.
+    #[serde(default)]
+    theme: Option<ThemeConfig>,
     /// Mapping from language to server spawn command.
     /// ```toml
     /// [servers]
@@ -173,12 +176,34 @@ enum CaptureMapping {
     Language(HashMap<String, String>),
 }
 
-/// A `RawConfig` parsed into a format the `lsp::ServerRegistry` understands
+#[derive(Debug, serde::Deserialize)]
+#[serde(untagged)]
+enum ThemeConfig {
+    Builtin(String),
+    Custom { path: PathBuf },
+}
+
+impl ThemeConfig {
+    fn resolve_relative_to(self, config_path: &Path) -> Self {
+        match self {
+            Self::Custom { path } if path.is_relative() => Self::Custom {
+                path: config_path
+                    .parent()
+                    .unwrap_or_else(|| Path::new("."))
+                    .join(path),
+            },
+            theme => theme,
+        }
+    }
+}
+
+/// A `RawConfig` parsed into runtime configuration.
 #[derive(Debug)]
 struct Config {
     commands: lsp::Commands,
     general_mapping: lsp::CaptureMapping,
     lang_mapping: lsp::LangCaptureMapping,
+    theme: Option<ThemeConfig>,
 }
 
 impl Default for Config {
@@ -187,6 +212,7 @@ impl Default for Config {
             commands: lsp::default_commands(),
             general_mapping: lsp::CaptureMapping::new(),
             lang_mapping: lsp::LangCaptureMapping::new(),
+            theme: None,
         }
     }
 }
@@ -198,7 +224,13 @@ impl Config {
             commands: lsp::Commands::new(),
             general_mapping: lsp::CaptureMapping::new(),
             lang_mapping: lsp::LangCaptureMapping::new(),
+            theme: None,
         }
+    }
+
+    fn without_lsp(mut self) -> Self {
+        self.commands.clear();
+        self
     }
 
     /// Read a config from file, parses `RawConfig` and converts it into `Config`
@@ -212,9 +244,14 @@ impl Config {
             source,
         })?;
 
+        let RawConfig {
+            servers,
+            captures,
+            theme,
+        } = config;
+
         // parse commands
-        let config_commands = config
-            .servers
+        let config_commands = servers
             .into_iter()
             .map(|(language, command)| {
                 let language = lighter::LangName::from(language);
@@ -233,9 +270,9 @@ impl Config {
         let mut commands = lsp::default_commands();
         commands.extend(config_commands);
 
-        let mut general_mapping = HashMap::with_capacity(config.captures.len());
-        let mut lang_mapping = HashMap::with_capacity(config.captures.len());
-        for (key, val) in config.captures.into_iter() {
+        let mut general_mapping = HashMap::with_capacity(captures.len());
+        let mut lang_mapping = HashMap::with_capacity(captures.len());
+        for (key, val) in captures.into_iter() {
             match val {
                 CaptureMapping::Capture(mapping) => {
                     general_mapping.insert(key, mapping);
@@ -250,13 +287,15 @@ impl Config {
             commands,
             general_mapping,
             lang_mapping,
+            theme: theme.map(|theme| theme.resolve_relative_to(path)),
         })
     }
 
     /// Load a config based on CLI arguments
     fn load(no_lsp: bool, config_path: Option<&Path>) -> Result<Config> {
         match (no_lsp, config_path) {
-            (true, _) => Ok(Config::no_lsp()),
+            (true, None) => Ok(Config::no_lsp()),
+            (true, Some(path)) => Config::from_file(path).map(Config::without_lsp),
             (false, None) => Ok(Config::default()),
             (false, Some(path)) => Config::from_file(path),
         }
@@ -282,7 +321,11 @@ impl TryFrom<CliInterface> for CliOptions {
     fn try_from(cli: CliInterface) -> Result<Self> {
         let lang = CliOptions::resolve_language(cli.lang.as_deref(), cli.file.as_deref())?;
         let config = Config::load(cli.no_lsp, cli.config.as_deref())?;
-        let theme = CliOptions::load_theme(cli.theme.as_deref(), cli.custom_theme.as_deref())?;
+        let theme = CliOptions::load_theme(
+            cli.theme.as_deref(),
+            cli.custom_theme.as_deref(),
+            config.theme.as_ref(),
+        )?;
         let CliInterface {
             file,
             project,
@@ -312,6 +355,7 @@ impl CliOptions {
     fn load_theme(
         builtin_theme: Option<&str>,
         custom_path: Option<&Path>,
+        config_theme: Option<&ThemeConfig>,
     ) -> Result<arborium::theme::Theme> {
         /// Load custom theme from file
         fn load_custom_theme(path: &Path) -> Result<arborium::theme::Theme> {
@@ -332,11 +376,13 @@ impl CliOptions {
                 .ok_or_else(|| Error::UnknownBuiltinTheme(name.to_owned()))
         }
 
-        match (builtin_theme, custom_path) {
-            (Some(name), None) => load_builtin_theme(name),
-            (None, Some(path)) => load_custom_theme(path),
-            (None, None) => Ok(arborium_theme::builtin::catppuccin_mocha()),
-            (Some(_), Some(_)) => unreachable!("clap rejects conflicting theme options"),
+        match (builtin_theme, custom_path, config_theme) {
+            (Some(name), None, _) => load_builtin_theme(name),
+            (None, Some(path), _) => load_custom_theme(path),
+            (None, None, Some(ThemeConfig::Builtin(name))) => load_builtin_theme(name),
+            (None, None, Some(ThemeConfig::Custom { path })) => load_custom_theme(path),
+            (None, None, None) => Ok(arborium_theme::builtin::catppuccin_mocha()),
+            (Some(_), Some(_), _) => unreachable!("clap rejects conflicting theme options"),
         }
     }
 
@@ -423,6 +469,17 @@ mod tests {
     use std::assert_matches;
 
     const STUB_FILE: &str = "stub.py";
+    const CONFIG_FILE_NAME: &str = "config.toml";
+    const CUSTOM_THEME_NAME: &str = "Config custom theme";
+    const UNKNOWN_THEME_NAME: &str = "unknown-theme";
+    const CUSTOM_THEME_BODY: &str = r##"
+variant = "light"
+
+"keyword" = { fg = "accent" }
+
+[palette]
+accent = "#010203"
+"##;
 
     enum CliArgs {
         Config,
@@ -430,6 +487,7 @@ mod tests {
         Format,
         Lang,
         Lines,
+        NoLsp,
         Project,
         Log,
         Theme,
@@ -444,6 +502,7 @@ mod tests {
                 CliArgs::Lang => "--lang",
                 CliArgs::Lines => "--lines",
                 CliArgs::Log => "--log",
+                CliArgs::NoLsp => "--no-lsp",
                 CliArgs::Project => "--project",
                 CliArgs::Theme => "--theme",
             }
@@ -533,6 +592,18 @@ mod tests {
 
     fn parse_builtin_theme(name: &str) -> Result<String> {
         parse_cli_value(CliArgs::Theme, name).map(|options| options.theme.name)
+    }
+
+    fn builtin_theme_config(name: &str) -> String {
+        format!("theme = {name:?}\n")
+    }
+
+    fn custom_theme_config(path: &Path) -> String {
+        format!("theme = {{ path = {:?} }}\n", path_value(path))
+    }
+
+    fn custom_theme_source() -> String {
+        format!("name = {CUSTOM_THEME_NAME:?}\n{CUSTOM_THEME_BODY}")
     }
 
     quickcheck::quickcheck! {
@@ -649,6 +720,79 @@ mod tests {
     }
 
     #[test]
+    fn accept_builtin_theme_from_config_case_insensitively() {
+        let expected = builtin_themes().into_iter().next().unwrap();
+        let file = temp_file(
+            CONFIG_FILE_NAME,
+            &builtin_theme_config(&expected.name.to_lowercase()),
+        );
+
+        let options = parse_cli_value(CliArgs::Config, path_value(file.path())).unwrap();
+
+        assert_eq!(options.theme.name, expected.name);
+    }
+
+    #[test]
+    fn accept_custom_theme_relative_to_config_with_lsp_disabled() {
+        const THEME_FILE_NAME: &str = "theme.toml";
+        let dir = tempfile::tempdir().unwrap();
+        let theme_path = dir.path().join(THEME_FILE_NAME);
+        fs::write(&theme_path, custom_theme_source()).unwrap();
+        let config_path = dir.path().join(CONFIG_FILE_NAME);
+        fs::write(
+            &config_path,
+            custom_theme_config(Path::new(THEME_FILE_NAME)),
+        )
+        .unwrap();
+
+        let options = parse_options(&[
+            STUB_FILE,
+            CliArgs::NoLsp.as_str(),
+            CliArgs::Config.as_str(),
+            path_value(&config_path),
+        ])
+        .unwrap();
+
+        assert_eq!(options.theme.name, CUSTOM_THEME_NAME);
+        assert!(options.config.commands.is_empty());
+    }
+
+    #[test]
+    fn command_line_theme_overrides_config_theme() {
+        let expected = builtin_themes().into_iter().next().unwrap();
+        let config = temp_file(CONFIG_FILE_NAME, &builtin_theme_config(UNKNOWN_THEME_NAME));
+
+        let options = parse_options(&[
+            STUB_FILE,
+            CliArgs::Config.as_str(),
+            path_value(config.path()),
+            CliArgs::Theme.as_str(),
+            &expected.name,
+        ])
+        .unwrap();
+
+        assert_eq!(options.theme.name, expected.name);
+    }
+
+    #[test]
+    fn reject_unknown_builtin_theme_from_config() {
+        let file = temp_file(CONFIG_FILE_NAME, &builtin_theme_config(UNKNOWN_THEME_NAME));
+
+        let error = parse_cli_value(CliArgs::Config, path_value(file.path())).unwrap_err();
+
+        assert_matches!(error, Error::UnknownBuiltinTheme(name) if name == UNKNOWN_THEME_NAME);
+    }
+
+    #[test]
+    fn reject_invalid_theme_config_shape() {
+        let file = temp_file(CONFIG_FILE_NAME, "theme = { name = \"invalid\" }");
+
+        let error = parse_cli_value(CliArgs::Config, path_value(file.path())).unwrap_err();
+
+        assert_matches!(error, Error::InvalidConfig { path, .. } if path == file.path());
+    }
+
+    #[test]
     fn accept_custom_theme_from_disk() {
         let expected = arborium_theme::builtin::catppuccin_mocha();
         let variant = match expected.is_dark {
@@ -762,10 +906,9 @@ rust = "'"
 
     #[test]
     fn reject_unknown_builtin_theme() {
-        let theme_name = "unknown-theme";
-        let error = CliOptions::load_theme(Some(theme_name), None).unwrap_err();
+        let error = CliOptions::load_theme(Some(UNKNOWN_THEME_NAME), None, None).unwrap_err();
 
-        assert_matches!(error, Error::UnknownBuiltinTheme(name) if name == theme_name);
+        assert_matches!(error, Error::UnknownBuiltinTheme(name) if name == UNKNOWN_THEME_NAME);
     }
 
     #[cfg(unix)]
