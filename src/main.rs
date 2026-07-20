@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs;
-use std::io::{self, Read};
+use std::io::{self, BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 
 use lighter::logging;
@@ -11,6 +11,9 @@ use clap::Parser;
 use thiserror::Error;
 
 const BIN_NAME: &str = "lighter";
+const STDIO_FRAME_TERMINATOR: u8 = b'\0';
+const STDIO_LANGUAGE_SEPARATOR: char = '\n';
+const STDIO_DIAGNOSTIC_PREFIX: &str = "lighter stdio:";
 const FANCYVERB_GROUP_CHARACTERS: [char; 2] = ['{', '}'];
 const LATEX_DELIMITER_GROUP_ERROR: &str = "cannot be a FancyVerb group character (`{` or `}`)";
 
@@ -21,6 +24,13 @@ type Result<T> = std::result::Result<T, Error>;
 struct CliInterface {
     /// Source file to highlight (reads stdin when omitted).
     file: Option<PathBuf>,
+
+    /// Run as a long-lived stdio server.
+    /// Requests are `LANG\nSOURCE\0`; responses are `HIGHLIGHTED\0`. An empty
+    /// request frame shuts down. Failed requests return an empty response and
+    /// report the error on stderr. Cannot be combined with FILE or --lang.
+    #[arg(long, conflicts_with_all = ["file", "lang"])]
+    stdio: bool,
 
     /// Project directory exposed to the language server as its workspace.
     #[arg(short, long, value_name = "DIR")]
@@ -156,6 +166,8 @@ enum Error {
     },
     #[error("Failed to read stdin")]
     StdinRead(#[source] io::Error),
+    #[error("Stdio server I/O failed")]
+    StdioIo(#[source] io::Error),
     #[error(transparent)]
     Lsp(#[from] lsp::Error),
     #[error(transparent)]
@@ -325,7 +337,8 @@ impl Config {
 #[derive(Debug)]
 struct CliOptions {
     file: Option<PathBuf>,
-    lang: lighter::LangName,
+    lang: Option<lighter::LangName>,
+    stdio: bool,
     theme: arborium::theme::Theme,
     config: Config,
     project: Option<PathBuf>,
@@ -340,7 +353,13 @@ impl TryFrom<CliInterface> for CliOptions {
     type Error = Error;
 
     fn try_from(cli: CliInterface) -> Result<Self> {
-        let lang = CliOptions::resolve_language(cli.lang.as_deref(), cli.file.as_deref())?;
+        let lang = match cli.stdio {
+            true => None,
+            false => Some(CliOptions::resolve_language(
+                cli.lang.as_deref(),
+                cli.file.as_deref(),
+            )?),
+        };
         let config = Config::load(cli.no_lsp, cli.config.as_deref())?;
         let theme = CliOptions::load_theme(
             cli.theme.as_deref(),
@@ -349,6 +368,7 @@ impl TryFrom<CliInterface> for CliOptions {
         )?;
         let CliInterface {
             file,
+            stdio,
             project,
             format,
             latex_delimiter,
@@ -364,6 +384,7 @@ impl TryFrom<CliInterface> for CliOptions {
         Ok(Self {
             file,
             lang,
+            stdio,
             theme,
             config,
             project,
@@ -453,12 +474,118 @@ fn read_input_from(path: Option<&Path>, mut stdin: impl Read) -> Result<String> 
     }
 }
 
+#[derive(Debug, Error)]
+enum RequestFrameError {
+    #[error("request frame is not valid UTF-8: {0}")]
+    InvalidUtf8(#[from] std::str::Utf8Error),
+    #[error("request frame is missing the language/source newline separator")]
+    MissingLanguageSeparator,
+    #[error("request frame has an empty language")]
+    EmptyLanguage,
+    #[error("request frame is missing its NUL terminator")]
+    MissingTerminator,
+}
+
+fn parse_request_frame(frame: &[u8]) -> std::result::Result<(&str, &str), RequestFrameError> {
+    let frame = std::str::from_utf8(frame)?;
+    let (language, source) = frame
+        .split_once(STDIO_LANGUAGE_SEPARATOR)
+        .ok_or(RequestFrameError::MissingLanguageSeparator)?;
+
+    match language.is_empty() {
+        true => Err(RequestFrameError::EmptyLanguage),
+        false => Ok((language, source)),
+    }
+}
+
+fn write_stdio_response(mut output: impl Write, response: &str) -> io::Result<()> {
+    output.write_all(response.as_bytes())?;
+    output.write_all(&[STDIO_FRAME_TERMINATOR])?;
+    output.flush()
+}
+
+fn report_stdio_error(
+    mut diagnostics: impl Write,
+    error: &impl std::fmt::Display,
+) -> io::Result<()> {
+    writeln!(diagnostics, "{STDIO_DIAGNOSTIC_PREFIX} {error}")
+}
+
+/// Serve NUL-delimited highlight requests until an empty frame or EOF.
+///
+/// A malformed request receives an empty response so clients retain one
+/// response per non-shutdown frame. Its diagnostic is written separately.
+fn serve_stdio<R, W, D, F, E>(
+    mut input: R,
+    mut output: W,
+    mut diagnostics: D,
+    mut highlight: F,
+) -> io::Result<()>
+where
+    R: BufRead,
+    W: Write,
+    D: Write,
+    F: FnMut(&str, &str) -> std::result::Result<String, E>,
+    E: std::fmt::Display,
+{
+    let mut finished = false;
+    let frames = std::iter::from_fn(|| match finished {
+        true => None,
+        false => {
+            let mut frame = Vec::new();
+            match input.read_until(STDIO_FRAME_TERMINATOR, &mut frame) {
+                Ok(0) => {
+                    finished = true;
+                    None
+                }
+                Ok(_) => {
+                    let terminated = frame.last() == Some(&STDIO_FRAME_TERMINATOR);
+                    match terminated {
+                        true => {
+                            frame.pop();
+                        }
+                        false => finished = true,
+                    }
+                    Some(Ok((frame, terminated)))
+                }
+                Err(error) => {
+                    finished = true;
+                    Some(Err(error))
+                }
+            }
+        }
+    });
+
+    frames
+        .take_while(|frame| match frame {
+            Ok((frame, terminated)) => !(frame.is_empty() && *terminated),
+            Err(_) => true,
+        })
+        .try_for_each(|frame| {
+            let (frame, terminated) = frame?;
+            let response = match terminated {
+                false => Err(RequestFrameError::MissingTerminator.to_string()),
+                true => parse_request_frame(&frame)
+                    .map_err(|error| error.to_string())
+                    .and_then(|(language, source)| {
+                        highlight(language, source).map_err(|error| error.to_string())
+                    }),
+            };
+
+            match response {
+                Ok(response) => write_stdio_response(&mut output, &response),
+                Err(error) => {
+                    report_stdio_error(&mut diagnostics, &error)?;
+                    write_stdio_response(&mut output, "")
+                }
+            }
+        })
+}
+
 fn main() -> Result<()> {
     let cli = CliInterface::parse();
 
     let options = CliOptions::try_from(cli)?;
-    let source = read_input(options.file.as_deref())?;
-
     let registry = RefCell::new(lsp::ServerRegistry::new(
         options.config.commands,
         options.config.general_mapping,
@@ -466,11 +593,6 @@ fn main() -> Result<()> {
         options.project.as_deref(),
         options.log,
     )?);
-    let input = lighter::Input {
-        source: &source,
-        path: options.file.as_deref(),
-        lang: options.lang,
-    };
     let highlighter = lighter::Highlighter::with_options(
         registry,
         lighter::HighlightOptions {
@@ -482,11 +604,35 @@ fn main() -> Result<()> {
         },
         options.log,
     );
-    let output = highlighter.highlight(input)?;
 
-    print!("{output}");
-
-    Ok(())
+    match options.stdio {
+        true => serve_stdio(
+            io::stdin().lock(),
+            io::stdout().lock(),
+            io::stderr().lock(),
+            |language, source| {
+                highlighter.highlight(lighter::Input {
+                    source,
+                    path: None,
+                    lang: lighter::LangName::from(language),
+                })
+            },
+        )
+        .map_err(Error::StdioIo),
+        false => {
+            let source = read_input(options.file.as_deref())?;
+            let input = lighter::Input {
+                source: &source,
+                path: options.file.as_deref(),
+                lang: options
+                    .lang
+                    .expect("non-stdio mode always resolves a language"),
+            };
+            let output = highlighter.highlight(input)?;
+            print!("{output}");
+            Ok(())
+        }
+    }
 }
 
 #[cfg(test)]
@@ -518,6 +664,7 @@ accent = "#010203"
         NoLsp,
         Project,
         Log,
+        Stdio,
         Theme,
     }
 
@@ -533,6 +680,7 @@ accent = "#010203"
                 CliArgs::Log => "--log",
                 CliArgs::NoLsp => "--no-lsp",
                 CliArgs::Project => "--project",
+                CliArgs::Stdio => "--stdio",
                 CliArgs::Theme => "--theme",
             }
         }
@@ -681,7 +829,28 @@ accent = "#010203"
         let language = "rust";
         let options = parse_cli_value(CliArgs::Lang, language).unwrap();
 
-        assert_eq!(options.lang.as_ref(), language);
+        assert_eq!(options.lang.as_deref(), Some(language));
+    }
+
+    #[test]
+    fn accept_stdio_without_a_language_and_reject_single_input_arguments() {
+        let options = parse_options(&[CliArgs::Stdio.as_str()]).unwrap();
+
+        assert!(options.stdio);
+        assert!(options.lang.is_none());
+
+        [
+            vec![CliArgs::Stdio.as_str(), STUB_FILE],
+            vec![CliArgs::Stdio.as_str(), CliArgs::Lang.as_str(), "rust"],
+        ]
+        .into_iter()
+        .for_each(|args| {
+            assert_matches!(
+                parse_options(&args),
+                Err(Error::Cli(error))
+                    if error.kind() == clap::error::ErrorKind::ArgumentConflict
+            );
+        });
     }
 
     #[test]
@@ -1038,5 +1207,159 @@ rust = "'"
         let error = read_input_from(None, FailingReader).unwrap_err();
 
         assert_matches!(error, Error::StdinRead(_));
+    }
+
+    struct ChunkedReader<R> {
+        inner: R,
+        chunk_size: usize,
+    }
+
+    impl<R: Read> Read for ChunkedReader<R> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let length = buf.len().min(self.chunk_size);
+            self.inner.read(&mut buf[..length])
+        }
+    }
+
+    fn request_frame(language: &str, source: &str) -> Vec<u8> {
+        let mut frame = format!("{language}{STDIO_LANGUAGE_SEPARATOR}{source}").into_bytes();
+        frame.push(STDIO_FRAME_TERMINATOR);
+        frame
+    }
+
+    fn response_frame(response: &str) -> Vec<u8> {
+        let mut frame = response.as_bytes().to_vec();
+        frame.push(STDIO_FRAME_TERMINATOR);
+        frame
+    }
+
+    #[test]
+    fn stdio_serves_partial_multiple_utf8_frames_and_stops_on_an_empty_frame() {
+        const FIRST_LANGUAGE: &str = "rust";
+        const FIRST_SOURCE: &str = "let value = 1;";
+        const SECOND_LANGUAGE: &str = "python";
+        const SECOND_SOURCE: &str = "print('😀')";
+        const IGNORED_SOURCE: &str = "ignored";
+        let requests = [
+            (FIRST_LANGUAGE, FIRST_SOURCE),
+            (SECOND_LANGUAGE, SECOND_SOURCE),
+        ];
+        let mut input = requests
+            .into_iter()
+            .flat_map(|(language, source)| request_frame(language, source))
+            .collect::<Vec<_>>();
+        input.push(STDIO_FRAME_TERMINATOR);
+        input.extend(request_frame(FIRST_LANGUAGE, IGNORED_SOURCE));
+        let reader = io::BufReader::new(ChunkedReader {
+            inner: io::Cursor::new(input),
+            chunk_size: 1,
+        });
+        let mut output = Vec::new();
+        let mut diagnostics = Vec::new();
+        let mut received = Vec::new();
+
+        serve_stdio(reader, &mut output, &mut diagnostics, |language, source| {
+            received.push((language.to_owned(), source.to_owned()));
+            Ok::<_, std::convert::Infallible>(format!("{language}:{source}"))
+        })
+        .unwrap();
+
+        let expected = requests
+            .into_iter()
+            .flat_map(|(language, source)| response_frame(&format!("{language}:{source}")))
+            .collect::<Vec<_>>();
+        assert_eq!(output, expected);
+        assert!(diagnostics.is_empty());
+        assert_eq!(
+            received,
+            requests
+                .into_iter()
+                .map(|(language, source)| (language.to_owned(), source.to_owned()))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn stdio_reports_malformed_frames_and_recovers_at_the_next_terminator() {
+        const MISSING_SEPARATOR: &str = "missing-separator";
+        const VALID_LANGUAGE: &str = "rust";
+        const VALID_SOURCE: &str = "valid";
+        const UNTERMINATED_SOURCE: &str = "unfinished";
+        let mut input = response_frame(MISSING_SEPARATOR);
+        input.extend(request_frame("", "empty language"));
+        let invalid_utf8_body = format!("{VALID_LANGUAGE}{STDIO_LANGUAGE_SEPARATOR}")
+            .bytes()
+            .chain([0xff])
+            .collect::<Vec<_>>();
+        input.extend(
+            invalid_utf8_body
+                .iter()
+                .copied()
+                .chain([STDIO_FRAME_TERMINATOR]),
+        );
+        input.extend(request_frame(VALID_LANGUAGE, VALID_SOURCE));
+        input.extend(
+            format!("{VALID_LANGUAGE}{STDIO_LANGUAGE_SEPARATOR}{UNTERMINATED_SOURCE}").as_bytes(),
+        );
+        let mut output = Vec::new();
+        let mut diagnostics = Vec::new();
+
+        serve_stdio(
+            io::Cursor::new(input),
+            &mut output,
+            &mut diagnostics,
+            |_language, source| Ok::<_, std::convert::Infallible>(source.to_owned()),
+        )
+        .unwrap();
+
+        let expected = ["", "", "", VALID_SOURCE, ""]
+            .into_iter()
+            .flat_map(response_frame)
+            .collect::<Vec<_>>();
+        assert_eq!(output, expected);
+        let diagnostics = String::from_utf8(diagnostics).unwrap();
+        assert!(diagnostics.contains(&RequestFrameError::MissingLanguageSeparator.to_string()));
+        assert!(diagnostics.contains(&RequestFrameError::EmptyLanguage.to_string()));
+        let invalid_utf8 = parse_request_frame(&invalid_utf8_body)
+            .unwrap_err()
+            .to_string();
+        assert!(diagnostics.contains(&invalid_utf8));
+        assert!(diagnostics.contains(&RequestFrameError::MissingTerminator.to_string()));
+    }
+
+    #[test]
+    fn stdio_reports_highlight_errors_and_continues_with_the_next_frame() {
+        const LANGUAGE: &str = "rust";
+        const FAILED_SOURCE: &str = "failed";
+        const VALID_SOURCE: &str = "valid";
+        const HIGHLIGHT_ERROR: &str = "highlight failed";
+        let mut input = [FAILED_SOURCE, VALID_SOURCE]
+            .into_iter()
+            .flat_map(|source| request_frame(LANGUAGE, source))
+            .collect::<Vec<_>>();
+        input.push(STDIO_FRAME_TERMINATOR);
+        let mut output = Vec::new();
+        let mut diagnostics = Vec::new();
+
+        serve_stdio(
+            io::Cursor::new(input),
+            &mut output,
+            &mut diagnostics,
+            |_language, source| match source {
+                FAILED_SOURCE => Err(HIGHLIGHT_ERROR),
+                source => Ok(source.to_owned()),
+            },
+        )
+        .unwrap();
+
+        let expected = ["", VALID_SOURCE]
+            .into_iter()
+            .flat_map(response_frame)
+            .collect::<Vec<_>>();
+        assert_eq!(output, expected);
+        assert_eq!(
+            String::from_utf8(diagnostics).unwrap(),
+            format!("{STDIO_DIAGNOSTIC_PREFIX} {HIGHLIGHT_ERROR}\n")
+        );
     }
 }
