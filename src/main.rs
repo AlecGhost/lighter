@@ -94,9 +94,12 @@ enum Error {
         source: toml::de::Error,
     },
     #[error("Invalid command string for language '{language}': {command}")]
-    InvalidCommand { language: String, command: String },
+    InvalidCommand {
+        language: lighter::LangName,
+        command: String,
+    },
     #[error("Empty command string for language '{0}'")]
-    EmptyCommand(String),
+    EmptyCommand(lighter::LangName),
     #[error("Failed to read theme file '{}'", .path.display())]
     ThemeRead {
         path: PathBuf,
@@ -209,6 +212,7 @@ impl Config {
             .servers
             .into_iter()
             .map(|(language, command)| {
+                let language = lighter::LangName::from(language);
                 let parts = shlex::split(&command).ok_or_else(|| Error::InvalidCommand {
                     language: language.clone(),
                     command,
@@ -217,10 +221,7 @@ impl Config {
                     return Err(Error::EmptyCommand(language));
                 };
 
-                Ok((
-                    lighter::LangName::from(language.as_str()),
-                    lsp::CommandEntry::new(program, args),
-                ))
+                Ok((language, lsp::CommandEntry::new(program, args)))
             })
             .collect::<Result<Vec<_>>>()?;
 
@@ -562,6 +563,14 @@ mod tests {
     }
 
     #[test]
+    fn accept_explicit_language() {
+        let language = "rust";
+        let options = parse_cli_value(CliArgs::Lang, language).unwrap();
+
+        assert_eq!(options.lang.as_ref(), language);
+    }
+
+    #[test]
     fn accept_config() {
         let cmd = lsp::CommandEntry {
             command: "custom-server".to_string(),
@@ -637,7 +646,7 @@ rust = "'"
         assert_matches!(
             error,
             Error::InvalidCommand { language, command }
-                if language == "rust" && command == "'"
+                if language.as_ref() == "rust" && command == "'"
         );
     }
 

@@ -17,7 +17,6 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::rc::Rc;
 use std::str::FromStr;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -53,7 +52,7 @@ static NEXT_TEMP_FILE_ID: AtomicUsize = AtomicUsize::new(0);
 #[derive(Error, Debug)]
 pub enum Error {
     #[error("No language server available for {0}")]
-    NoServer(String),
+    NoServer(LangName),
     #[error("Failed to start server for {0}: {1}")]
     FailedServerCommand(String, #[source] std::io::Error),
     #[error("Language server I/O failed: {0}")]
@@ -65,7 +64,7 @@ pub enum Error {
     #[error(transparent)]
     Rpc(#[from] rpc::Error),
     #[error("Language server for '{0}' does not provide semantic tokens")]
-    NoSemanticTokens(String),
+    NoSemanticTokens(LangName),
 }
 
 pub type CaptureMapping = HashMap<String, String>;
@@ -92,7 +91,7 @@ impl CommandEntry {
 }
 
 /// Default server commands
-pub fn default_commands() -> HashMap<LangName, CommandEntry> {
+pub fn default_commands() -> Commands {
     let entries: &[(&str, &str, &[&str])] = &[
         ("rust", "rust-analyzer", &[]),
         ("python", "basedpyright-langserver", &["--stdio"]),
@@ -125,7 +124,9 @@ pub fn default_commands() -> HashMap<LangName, CommandEntry> {
 
     entries
         .iter()
-        .map(|(language, command, args)| (Rc::from(*language), CommandEntry::new(command, args)))
+        .map(|(language, command, args)| {
+            (LangName::from(*language), CommandEntry::new(command, args))
+        })
         .collect()
 }
 
@@ -141,7 +142,7 @@ pub struct ServerRegistry {
 
 impl ServerRegistry {
     pub fn new(
-        commands: HashMap<LangName, CommandEntry>,
+        commands: Commands,
         general_mapping: CaptureMapping,
         lang_mapping: LangCaptureMapping,
         project: Option<&Path>,
@@ -164,7 +165,7 @@ impl ServerRegistry {
                 let command = self
                     .commands
                     .get(&lang)
-                    .ok_or_else(|| Error::NoServer(lang.to_string()))?;
+                    .ok_or_else(|| Error::NoServer(lang.clone()))?;
                 entry.insert(Client::new(
                     command,
                     &lang,
@@ -277,20 +278,20 @@ struct Connection {
 #[derive(Debug)]
 struct Client {
     connection: Mutex<Connection>,
-    language: String,
+    language: LangName,
     semantic_tokens_legend: SemanticTokensLegend,
 }
 
 impl Client {
     fn new(
         command_entry: &CommandEntry,
-        language: &str,
+        language: &LangName,
         project: Option<&Project>,
         log: LogLevel,
     ) -> Result<Self> {
         let mut connection = Self::spawn_server(command_entry, project, log)?;
         let semantic_tokens_legend = match Self::initialize(&mut connection.rpc, project) {
-            Ok(None) => Err(Error::NoSemanticTokens(language.to_string())),
+            Ok(None) => Err(Error::NoSemanticTokens(language.clone())),
             Ok(Some(legend)) => Ok(legend),
             Err(error) => {
                 let _ = connection.child.kill();
@@ -301,7 +302,7 @@ impl Client {
 
         Ok(Self {
             connection: Mutex::new(connection),
-            language: language.to_string(),
+            language: language.clone(),
             semantic_tokens_legend,
         })
     }
@@ -357,7 +358,7 @@ impl Client {
             .notify::<DidOpenTextDocument>(DidOpenTextDocumentParams {
                 text_document: TextDocumentItem::new(
                     uri.clone(),
-                    self.language.clone(),
+                    self.language.to_string(),
                     1,
                     text.to_string(),
                 ),
