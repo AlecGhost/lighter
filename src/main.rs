@@ -2,23 +2,23 @@ use anyhow::{Context, Result, anyhow, bail};
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Read};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+use lighter::logging;
+use lighter::lsp;
 
 use clap::Parser;
-use clap::builder::PossibleValuesParser;
 
-mod lighter;
-mod logging;
-mod lsp;
+const BIN_NAME: &str = "lighter";
 
 #[derive(Parser, Debug)]
-#[command(name = "lighter", version, about)]
-struct Cli {
+#[command(name = BIN_NAME, version, about)]
+struct CliInterface {
     /// Source file to highlight (reads stdin when omitted).
     file: Option<PathBuf>,
 
     /// Project directory exposed to the language server as its workspace.
-    #[arg(long, value_name = "DIR")]
+    #[arg(short, long, value_name = "DIR")]
     project: Option<PathBuf>,
 
     /// Language name (e.g. "rust", "python").
@@ -67,101 +67,231 @@ struct Cli {
     log: logging::LogLevel,
 }
 
-#[derive(serde::Deserialize)]
-struct ConfigRaw {
-    #[serde(default)]
-    commands: HashMap<String, String>,
-    #[serde(default)]
-    captures: lighter::CaptureMappings,
-}
-
-struct Config {
-    commands: HashMap<lsp::LangName, lsp::CommandEntry>,
-    captures: lighter::CaptureMappings,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            commands: lsp::default_commands(),
-            captures: lighter::CaptureMappings::new(),
-        }
-    }
-}
-
-/// Load and parse TOML config file.
-///
-/// Expected format:
-/// ```toml
-/// [commands]
-/// rust = "rust-analyzer"
-/// typescript = "typescript-language-server --stdio"
-///
-/// [captures]
-/// param = "parameter"
-///
-/// [captures.rust]
-/// const = "constant"
-/// ```
-///
-/// Configured commands update the default commands.
-fn load_config(path: &PathBuf) -> Result<Config> {
-    let text = fs::read_to_string(path)
-        .with_context(|| format!("Failed to read config file '{}'", path.display()))?;
-    let config: ConfigRaw = toml::from_str(&text)
-        .with_context(|| format!("Invalid toml in config file '{}'", path.display()))?;
-
-    let mut commands = lsp::default_commands();
-    for (lang, cmd_str) in config.commands {
-        let parts = shlex::split(&cmd_str)
-            .with_context(|| format!("Invalid command string for language '{lang}': {cmd_str}"))?;
-        if parts.is_empty() {
-            bail!("Empty command string for language '{lang}'");
-        }
-        commands.insert(
-            lsp::LangName::from(lang.as_str()),
-            lsp::CommandEntry {
-                command: parts[0].clone(),
-                args: parts[1..].to_vec(),
-            },
-        );
-    }
-    Ok(Config {
-        commands,
-        captures: config.captures,
-    })
-}
-
-fn load_custom_theme(path: &PathBuf) -> Result<arborium::theme::Theme> {
-    let text = fs::read_to_string(path)
-        .with_context(|| format!("Failed to read theme file '{}'", path.display()))?;
-    arborium::theme::Theme::from_toml(&text)
-        .with_context(|| format!("Invalid theme file '{}'", path.display()))
-}
-
-fn builtin_theme_parser() -> PossibleValuesParser {
-    PossibleValuesParser::new(
+fn builtin_theme_parser() -> clap::builder::PossibleValuesParser {
+    clap::builder::PossibleValuesParser::new(
         arborium::theme::builtin::all()
             .into_iter()
             .map(|theme| theme.name),
     )
 }
 
-fn load_builtin_theme(name: &str) -> Result<arborium::theme::Theme> {
-    arborium::theme::builtin::all()
-        .into_iter()
-        .find(|theme| theme.name.eq_ignore_ascii_case(name))
-        .ok_or_else(|| anyhow!("Unknown built-in theme '{name}'"))
+/// Raw config maps directly to how the TOML is structured
+#[derive(serde::Deserialize)]
+struct RawConfig {
+    /// Mapping from language to server spawn command.
+    /// ```toml
+    /// [servers]
+    /// rust = "rust-analyzer --stdio"
+    /// ```
+    #[serde(default)]
+    servers: HashMap<String, String>,
+    /// Mapping from LSP captures to Tree-Sitter captures.
+    ///
+    /// Supports general and language-specific capture mapping.
+    /// ```toml
+    /// [captures]
+    /// decorator = "constant"
+    ///
+    /// [captures.rust]
+    /// const = "constant"
+    /// ```
+    #[serde(default)]
+    captures: HashMap<String, CaptureMapping>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(untagged)]
+enum CaptureMapping {
+    Capture(String),
+    Language(HashMap<String, String>),
+}
+
+/// A `RawConfig` parsed into a format the `lsp::ServerRegistry` understands
+struct Config {
+    commands: lsp::Commands,
+    mappings: lsp::CaptureMappings,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            commands: lsp::default_commands(),
+            mappings: lsp::CaptureMappings::new(),
+        }
+    }
+}
+
+impl Config {
+    /// A config without LSP server commands, thus no LSP can be started
+    fn no_lsp() -> Self {
+        Self {
+            commands: lsp::Commands::new(),
+            mappings: lsp::CaptureMappings::new(),
+        }
+    }
+
+    /// Read a config from file, parses `RawConfig` and converts it into `Config`
+    fn from_file(path: &Path) -> Result<Self> {
+        let text = fs::read_to_string(path)
+            .with_context(|| format!("Failed to read config file '{}'", path.display()))?;
+        let config: RawConfig = toml::from_str(&text)
+            .with_context(|| format!("Invalid toml in config file '{}'", path.display()))?;
+
+        // parse commands
+        let config_commands = config
+            .servers
+            .into_iter()
+            .map(|(language, command)| {
+                let parts = shlex::split(&command).with_context(|| {
+                    format!("Invalid command string for language '{language}': {command}")
+                })?;
+                let Some((program, args)) = parts.split_first() else {
+                    bail!("Empty command string for language '{language}'");
+                };
+
+                Ok((
+                    lighter::LangName::from(language.as_str()),
+                    lsp::CommandEntry::new(program, args),
+                ))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let mut commands = lsp::default_commands();
+        commands.extend(config_commands);
+
+        // TODO: add general mapping for all supported languages
+
+        // add all general mappings to the lang-specific mappings
+        let mut general_mappings = Vec::with_capacity(config.captures.len());
+        let mut lang_mappings = HashMap::with_capacity(config.captures.len());
+        for (key, val) in config.captures.into_iter() {
+            match val {
+                CaptureMapping::Capture(mapping) => general_mappings.push((key, mapping)),
+                CaptureMapping::Language(map) => {
+                    lang_mappings.insert(lighter::LangName::from(key), map);
+                }
+            }
+        }
+        lang_mappings.values_mut().for_each(|map| {
+            map.extend(general_mappings.clone());
+        });
+
+        Ok(Config {
+            commands,
+            mappings: lang_mappings,
+        })
+    }
+
+    /// Load a config based on CLI arguments
+    fn load(no_lsp: bool, config_path: Option<&Path>) -> Result<Config> {
+        match (no_lsp, config_path) {
+            (true, _) => Ok(Config::no_lsp()),
+            (false, None) => Ok(Config::default()),
+            (false, Some(path)) => Config::from_file(path),
+        }
+    }
+}
+
+struct CliOptions {
+    file: Option<PathBuf>,
+    lang: lighter::LangName,
+    theme: arborium::theme::Theme,
+    config: Config,
+    project: Option<PathBuf>,
+    log: logging::LogLevel,
+    format: lighter::Output,
+    no_tree_sitter: bool,
+}
+
+impl TryFrom<CliInterface> for CliOptions {
+    type Error = anyhow::Error;
+
+    fn try_from(cli: CliInterface) -> Result<Self> {
+        let lang = CliOptions::resolve_language(cli.lang.as_deref(), cli.file.as_deref())?;
+        let config = Config::load(cli.no_lsp, cli.config.as_deref())?;
+        let theme = CliOptions::load_theme(cli.theme.as_deref(), cli.custom_theme.as_deref())?;
+        let CliInterface {
+            file,
+            project,
+            format,
+            no_tree_sitter,
+            log,
+            ..
+        } = cli;
+
+        Ok(Self {
+            file,
+            lang,
+            theme,
+            config,
+            project,
+            log,
+            format,
+            no_tree_sitter,
+        })
+    }
+}
+
+impl CliOptions {
+    /// Load theme based on CLI arguments
+    fn load_theme(
+        builtin_theme: Option<&str>,
+        custom_path: Option<&Path>,
+    ) -> Result<arborium::theme::Theme> {
+        /// Load custom theme from file
+        fn load_custom_theme(path: &Path) -> Result<arborium::theme::Theme> {
+            let text = fs::read_to_string(path)
+                .with_context(|| format!("Failed to read theme file '{}'", path.display()))?;
+            arborium::theme::Theme::from_toml(&text)
+                .with_context(|| format!("Invalid theme file '{}'", path.display()))
+        }
+
+        fn load_builtin_theme(name: &str) -> Result<arborium::theme::Theme> {
+            arborium::theme::builtin::all()
+                .into_iter()
+                .find(|theme| theme.name.eq_ignore_ascii_case(name))
+                .ok_or_else(|| anyhow!("Unknown built-in theme '{name}'"))
+        }
+
+        match (builtin_theme, custom_path) {
+            (Some(name), None) => load_builtin_theme(name),
+            (None, Some(path)) => load_custom_theme(path),
+            (None, None) => Ok(arborium_theme::builtin::catppuccin_mocha()),
+            (Some(_), Some(_)) => unreachable!("clap rejects conflicting theme options"),
+        }
+    }
+
+    /// Detect language based on CLI arguments.
+    ///
+    /// Either from language argument or from file extension using arborium.
+    fn resolve_language(
+        lang_arg: Option<&str>,
+        file_arg: Option<&Path>,
+    ) -> Result<lighter::LangName> {
+        match (lang_arg, file_arg) {
+            (Some(lang), _) => Ok(lighter::LangName::from(lang)),
+            (None, Some(file_name)) => {
+                let path = file_name
+                    .to_str()
+                    .ok_or_else(|| anyhow!("Invalid path {}", file_name.display()))?;
+                arborium::detect_language(path).map(lighter::LangName::from).ok_or_else(|| {
+                anyhow!(
+                    "Could not detect language from file name '{path}'. Specify it with --lang flag."
+                )
+            })
+            }
+            (None, None) => {
+                bail!("Could not detect language. Specify it with --lang flag.")
+            }
+        }
+    }
 }
 
 /// Read input source code: from a file path or from stdin.
-fn read_input(path: Option<&PathBuf>) -> Result<String> {
+fn read_input(path: Option<&Path>) -> Result<String> {
     match path {
-        Some(p) => {
-            let source = fs::read_to_string(p)
-                .with_context(|| anyhow!("Failed to read source file '{}'", p.display()))?;
-            Ok(source)
-        }
+        Some(path) => fs::read_to_string(path)
+            .with_context(|| anyhow!("Failed to read source file '{}'", path.display())),
         None => {
             let mut buf = String::new();
             io::stdin()
@@ -172,62 +302,28 @@ fn read_input(path: Option<&PathBuf>) -> Result<String> {
     }
 }
 
-/// Detect language from file extension using arborium.
-fn resolve_language(
-    lang_option: Option<&str>,
-    file_option: Option<&PathBuf>,
-) -> Result<lsp::LangName> {
-    match (lang_option, file_option) {
-        (Some(lang), _) => Ok(lsp::LangName::from(lang)),
-        (None, Some(file)) => {
-            let path = file
-                .to_str()
-                .ok_or_else(|| anyhow!("Invalid path {}", file.display()))?;
-            arborium::detect_language(path).map(lsp::LangName::from).ok_or_else(|| {
-                anyhow!(
-                    "Could not detect language from file name '{path}'. Specify it with --lang flag."
-                )
-            })
-        }
-        (None, None) => {
-            bail!("Could not detect language. Specify it with --lang flag.")
-        }
-    }
-}
-
 fn main() -> Result<()> {
-    let cli = Cli::parse();
+    let cli = CliInterface::parse();
 
-    let source = read_input(cli.file.as_ref())?;
-    let lang = resolve_language(cli.lang.as_deref(), cli.file.as_ref())?;
-    let config = match (cli.no_lsp, cli.config.as_ref()) {
-        (true, _) => Config {
-            commands: HashMap::new(),
-            captures: lighter::CaptureMappings::new(),
-        },
-        (false, Some(path)) => load_config(path)?,
-        (false, None) => Config::default(),
-    };
-    let theme = match (cli.theme.as_deref(), cli.custom_theme.as_ref()) {
-        (Some(name), None) => load_builtin_theme(name)?,
-        (None, Some(path)) => load_custom_theme(path)?,
-        (None, None) => lighter::default_theme(),
-        (Some(_), Some(_)) => unreachable!("clap rejects conflicting theme options"),
-    };
+    let options = CliOptions::try_from(cli)?;
+    let source = read_input(options.file.as_deref())?;
 
-    let mut registry = lsp::ServerRegistry::new(config.commands, cli.project.as_deref(), cli.log)?;
+    let mut registry = lsp::ServerRegistry::new(
+        options.config.commands,
+        options.config.mappings,
+        options.project.as_deref(),
+        options.log,
+    )?;
     let output = lighter::highlight(
         &source,
-        cli.file.as_deref(),
-        lang,
+        options.file.as_deref(),
+        options.lang,
         &mut registry,
         &lighter::HighlightOptions {
-            output: cli.format,
-            lsp: !cli.no_lsp,
-            tree_sitter: !cli.no_tree_sitter,
-            theme,
-            captures: config.captures,
-            log: cli.log,
+            output: options.format,
+            tree_sitter: !options.no_tree_sitter,
+            theme: options.theme,
+            log: options.log,
         },
     )?;
 
@@ -239,91 +335,123 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::error::ErrorKind;
 
-    const BUILTIN_THEME_NAME: &str = "Dracula";
-    const CLI_NAME: &str = "lighter";
-    const LSP_CAPTURE_NAME: &str = "const";
-    const HIGHLIGHT_CAPTURE_NAME: &str = "constant";
-    const LANGUAGE_NAME: &str = "rust";
-    const OTHER_LANGUAGE_NAME: &str = "python";
-    const LANGUAGE_CAPTURE_NAME: &str = "constant.rust";
-    const CAPTURE_CONFIG: &str = r#"
-[captures]
-const = "constant"
+    const STUB_FILE: &str = "stub.py";
 
-[captures.rust]
-const = "constant.rust"
-"#;
-    const PROJECT_ARGUMENT: &str = "--project";
-    const PROJECT_DIRECTORY: &str = ".";
-    const LOG_ARGUMENT: &str = "--log";
-    const DEBUG_LOG_LEVEL: &str = "DEBUG";
-    const REMOVED_DEBUG_ARGUMENT: &str = "--debug";
-    const DEBUG_FORMAT: &str = "debug";
-    const FORMAT_ARGUMENT: &str = "--format";
+    enum CliArgs {
+        Project,
+        Log,
+        Theme,
+    }
 
-    fn parse_builtin_theme(name: &str) -> clap::error::Result<Cli> {
-        Cli::try_parse_from([CLI_NAME, "--theme", name])
+    impl CliArgs {
+        fn as_str(&self) -> &'static str {
+            match self {
+                CliArgs::Log => "--log",
+                CliArgs::Project => "--project",
+                CliArgs::Theme => "--theme",
+            }
+        }
+    }
+
+    fn temp_file(suffix: &str, source: &str) -> tempfile::NamedTempFile {
+        let file = tempfile::Builder::new().suffix(suffix).tempfile().unwrap();
+        fs::write(&file.path(), source).unwrap();
+        file
+    }
+
+    fn parse_options(args: &[&str]) -> Result<CliOptions> {
+        let cli =
+            CliInterface::try_parse_from(std::iter::once(BIN_NAME).chain(args.iter().copied()))?;
+        CliOptions::try_from(cli)
+    }
+
+    fn builtin_theme() -> arborium::theme::Theme {
+        arborium_theme::builtin::dracula()
+    }
+
+    fn parse_builtin_theme(name: &str) -> Result<String> {
+        parse_options(&[STUB_FILE, CliArgs::Theme.as_str(), &name])
+            .map(|options| options.theme.name)
     }
 
     #[test]
-    fn dynamic_parser_accepts_builtin_theme_case_insensitively() {
-        let cli = parse_builtin_theme(&BUILTIN_THEME_NAME.to_lowercase()).unwrap();
-        let theme = load_builtin_theme(cli.theme.as_deref().unwrap()).unwrap();
-
-        assert_eq!(theme.name, BUILTIN_THEME_NAME);
+    fn accept_builtin_theme() {
+        let theme = builtin_theme();
+        let name = parse_builtin_theme(&theme.name).unwrap();
+        assert_eq!(theme.name, name);
     }
 
     #[test]
-    fn dynamic_parser_rejects_unknown_theme() {
-        let error = parse_builtin_theme("unknown").unwrap_err();
-
-        assert_eq!(error.kind(), ErrorKind::InvalidValue);
+    fn accept_builtin_theme_case_insensitively() {
+        let theme = builtin_theme();
+        let name = parse_builtin_theme(&theme.name.to_lowercase()).unwrap();
+        assert_eq!(theme.name, name);
     }
 
     #[test]
-    fn parses_project_directory() {
-        let cli = Cli::try_parse_from([CLI_NAME, PROJECT_ARGUMENT, PROJECT_DIRECTORY]).unwrap();
-
-        assert_eq!(cli.project, Some(PathBuf::from(PROJECT_DIRECTORY)));
+    fn reject_unknown_theme() {
+        let _theme = builtin_theme();
+        let _error = parse_builtin_theme("unknown").unwrap_err();
     }
 
     #[test]
-    fn log_level_defaults_to_error_and_accepts_uppercase() {
-        let default_cli = Cli::try_parse_from([CLI_NAME]).unwrap();
-        let debug_cli = Cli::try_parse_from([CLI_NAME, LOG_ARGUMENT, DEBUG_LOG_LEVEL]).unwrap();
+    fn accept_project_directory() {
+        let dir = ".";
+        let options = parse_options(&[STUB_FILE, CliArgs::Project.as_str(), dir]).unwrap();
 
-        assert_eq!(default_cli.log, logging::LogLevel::Error);
-        assert_eq!(debug_cli.log, logging::LogLevel::Debug);
+        assert_eq!(options.project, Some(PathBuf::from(dir)));
     }
 
     #[test]
-    fn debug_is_not_an_output_format() {
-        let error = Cli::try_parse_from([CLI_NAME, FORMAT_ARGUMENT, DEBUG_FORMAT]).unwrap_err();
+    fn accept_log_level_case_insensitively() {
+        let log_level = logging::LogLevel::Debug;
+        let log = log_level.as_str().to_lowercase();
+        let options = parse_options(&[STUB_FILE, CliArgs::Log.as_str(), &log]).unwrap();
 
-        assert_eq!(error.kind(), ErrorKind::InvalidValue);
+        assert_eq!(log_level, options.log);
     }
 
     #[test]
-    fn debug_flag_is_removed() {
-        let error = Cli::try_parse_from([CLI_NAME, REMOVED_DEBUG_ARGUMENT]).unwrap_err();
+    fn accept_config() {
+        let cmd = lsp::CommandEntry {
+            command: "custom-server".to_string(),
+            args: vec!["--stdio".to_string(), "random arg".to_string()],
+        };
+        let server = "python";
+        let rust_mappings = ("const".to_string(), "constant".to_string());
+        let rust = lighter::LangName::from("rust");
+        let mappings = HashMap::from([(rust.clone(), HashMap::from([rust_mappings.clone()]))]);
+        let contents = format!(
+            r#"
+[servers]
+{server} = "{} {} '{}'"
 
-        assert_eq!(error.kind(), ErrorKind::UnknownArgument);
-    }
-
-    #[test]
-    fn parses_capture_mappings_without_commands() {
-        let config: ConfigRaw = toml::from_str(CAPTURE_CONFIG).unwrap();
-
-        assert!(config.commands.is_empty());
-        assert_eq!(
-            config.captures.get(LSP_CAPTURE_NAME, OTHER_LANGUAGE_NAME),
-            Some(HIGHLIGHT_CAPTURE_NAME)
+[captures.{rust}]
+{} = "{}"
+        "#,
+            cmd.command, cmd.args[0], cmd.args[1], rust_mappings.0, rust_mappings.1
         );
-        assert_eq!(
-            config.captures.get(LSP_CAPTURE_NAME, LANGUAGE_NAME),
-            Some(LANGUAGE_CAPTURE_NAME)
+        let file = temp_file("config.toml", &contents);
+        let config = Config::from_file(&file.path()).unwrap();
+        let parsed_command = config.commands.get(server).unwrap();
+
+        assert_eq!(&cmd, parsed_command);
+        assert_eq!(mappings, config.mappings);
+    }
+
+    #[test]
+    fn reject_empty_server_command() {
+        let file = temp_file(
+            ".toml",
+            r#"
+[servers]
+rust = " "
+"#,
         );
+
+        let error = Config::from_file(&file.path()).err().unwrap();
+
+        assert!(error.to_string().contains("Empty command string"));
     }
 }

@@ -22,25 +22,44 @@ const CONTENT_LENGTH: &str = "Content-Length";
 const MAX_MESSAGE_SIZE: usize = 64 * 1024 * 1024;
 const METHOD_NOT_FOUND_CODE: i64 = -32601;
 const METHOD_NOT_FOUND_MESSAGE: &str = "Method not found";
-const REQUEST_ID_OVERFLOW_MESSAGE: &str = "Request id overflow";
-const RESPONSE_WITHOUT_ID_MESSAGE: &str = "Response has no numeric id";
-const SERVER_REQUEST_WITHOUT_ID_MESSAGE: &str = "Server request has no id";
-const UNEXPECTED_RESPONSE_MESSAGE: &str = "Received a response while waiting for progress";
-const READER_DISCONNECTED_MESSAGE: &str = "Language server reader disconnected";
 
 #[derive(Error, Debug)]
-pub(crate) enum Error {
+pub enum Error {
     #[error("Language server I/O failed: {0}")]
     Io(#[from] std::io::Error),
     #[error("Language server sent invalid JSON: {0}")]
     InvalidJson(#[from] serde_json::Error),
     #[error("Language server protocol error: {0}")]
-    Protocol(String),
+    Protocol(#[from] ProtocolError),
     #[error("Language server returned error {code}: {message}")]
     Response { code: i64, message: String },
 }
 
 pub(crate) type Result<T> = std::result::Result<T, Error>;
+
+#[derive(Error, Debug, Eq, PartialEq)]
+pub enum ProtocolError {
+    #[error("Request id overflow")]
+    RequestIdOverflow,
+    #[error("Response has no numeric id")]
+    MissingResponseId,
+    #[error("Received response {received} while waiting for {expected}")]
+    MismatchedResponse { received: u64, expected: u64 },
+    #[error("Received a response while waiting for progress")]
+    ResponseDuringProgress,
+    #[error("Language server reader disconnected")]
+    ReaderDisconnected,
+    #[error("Server request has no id")]
+    MissingServerRequestId,
+    #[error("Malformed header: {0:?}")]
+    MalformedHeader(String),
+    #[error("Invalid Content-Length")]
+    InvalidContentLength,
+    #[error("Missing Content-Length header")]
+    MissingContentLength,
+    #[error("Message exceeds {MAX_MESSAGE_SIZE} byte limit")]
+    MessageTooLarge,
+}
 
 pub(crate) struct Connection {
     incoming: Receiver<Result<IncomingMessage>>,
@@ -52,16 +71,10 @@ pub(crate) struct Connection {
 }
 
 #[derive(Serialize)]
-struct RequestMessage<'a, P> {
+struct OutgoingMessage<'a, P> {
     jsonrpc: &'static str,
-    id: u64,
-    method: &'static str,
-    params: &'a P,
-}
-
-#[derive(Serialize)]
-struct NotificationMessage<'a, P> {
-    jsonrpc: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<u64>,
     method: &'static str,
     params: &'a P,
 }
@@ -118,7 +131,7 @@ impl fmt::Debug for Connection {
 }
 
 impl Connection {
-    pub(crate) fn new(stdout: ChildStdout, stdin: ChildStdin, log: LogLevel) -> Connection {
+    pub(crate) fn new(stdout: ChildStdout, stdin: ChildStdin, log: LogLevel) -> Self {
         Self::from_io(stdout, stdin, std::io::stderr(), log)
     }
 
@@ -127,7 +140,7 @@ impl Connection {
         writer: impl Write + Send + 'static,
         message_output: impl Write + Send + 'static,
         log: LogLevel,
-    ) -> Connection {
+    ) -> Self {
         let (sender, incoming) = mpsc::channel();
         std::thread::spawn(move || {
             let mut reader = BufReader::new(reader);
@@ -140,7 +153,7 @@ impl Connection {
             }
         });
 
-        Connection {
+        Self {
             incoming,
             writer: Box::new(writer),
             message_output: Box::new(message_output),
@@ -155,13 +168,13 @@ impl Connection {
         self.next_request_id = self
             .next_request_id
             .checked_add(1)
-            .ok_or_else(|| Error::Protocol(REQUEST_ID_OVERFLOW_MESSAGE.to_string()))?;
+            .ok_or(ProtocolError::RequestIdOverflow)?;
 
         write_message(
             &mut self.writer,
-            &RequestMessage {
+            &OutgoingMessage {
                 jsonrpc: JSON_RPC_VERSION,
-                id,
+                id: Some(id),
                 method: R::METHOD,
                 params: &params,
             },
@@ -177,11 +190,13 @@ impl Connection {
                 .id
                 .as_ref()
                 .and_then(Value::as_u64)
-                .ok_or_else(|| Error::Protocol(RESPONSE_WITHOUT_ID_MESSAGE.to_string()))?;
+                .ok_or(ProtocolError::MissingResponseId)?;
             if response_id != id {
-                return Err(Error::Protocol(format!(
-                    "Received response {response_id} while waiting for {id}"
-                )));
+                return Err(ProtocolError::MismatchedResponse {
+                    received: response_id,
+                    expected: id,
+                }
+                .into());
             }
 
             if let Some(error) = message.error {
@@ -198,8 +213,9 @@ impl Connection {
     pub(crate) fn notify<N: Notification>(&mut self, params: N::Params) -> Result<()> {
         write_message(
             &mut self.writer,
-            &NotificationMessage {
+            &OutgoingMessage {
                 jsonrpc: JSON_RPC_VERSION,
+                id: None,
                 method: N::METHOD,
                 params: &params,
             },
@@ -212,30 +228,31 @@ impl Connection {
         progress_timeout: Duration,
     ) -> Result<()> {
         let initial_deadline = Instant::now() + initial_timeout;
-        while let Some(message) = self.receive_until(initial_deadline)? {
-            if self.handle_incoming(message)?.is_some() {
-                return Err(Error::Protocol(UNEXPECTED_RESPONSE_MESSAGE.to_string()));
-            }
-        }
+        while self.receive_progress_until(initial_deadline)? {}
 
         let progress_deadline = Instant::now() + progress_timeout;
-        while !self.active_progress.is_empty() {
-            let Some(message) = self.receive_until(progress_deadline)? else {
-                self.active_progress.clear();
-                break;
-            };
-            if self.handle_incoming(message)?.is_some() {
-                return Err(Error::Protocol(UNEXPECTED_RESPONSE_MESSAGE.to_string()));
-            }
+        while !self.active_progress.is_empty() && self.receive_progress_until(progress_deadline)? {}
+        if !self.active_progress.is_empty() {
+            self.active_progress.clear();
         }
 
         Ok(())
     }
 
+    fn receive_progress_until(&mut self, deadline: Instant) -> Result<bool> {
+        let Some(message) = self.receive_until(deadline)? else {
+            return Ok(false);
+        };
+        if self.handle_incoming(message)?.is_some() {
+            return Err(ProtocolError::ResponseDuringProgress.into());
+        }
+        Ok(true)
+    }
+
     fn receive(&self) -> Result<IncomingMessage> {
         self.incoming
             .recv()
-            .map_err(|_| Error::Protocol(READER_DISCONNECTED_MESSAGE.to_string()))?
+            .map_err(|_| Error::from(ProtocolError::ReaderDisconnected))?
     }
 
     fn receive_until(&self, deadline: Instant) -> Result<Option<IncomingMessage>> {
@@ -245,9 +262,7 @@ impl Connection {
         match self.incoming.recv_timeout(timeout) {
             Ok(message) => message.map(Some),
             Err(RecvTimeoutError::Timeout) => Ok(None),
-            Err(RecvTimeoutError::Disconnected) => {
-                Err(Error::Protocol(READER_DISCONNECTED_MESSAGE.to_string()))
-            }
+            Err(RecvTimeoutError::Disconnected) => Err(ProtocolError::ReaderDisconnected.into()),
         }
     }
 
@@ -319,10 +334,10 @@ impl Connection {
     }
 
     fn display_optional_message(&mut self, message: Option<&str>) -> Result<()> {
-        match message {
-            Some(message) => self.display_message(message),
-            None => Ok(()),
+        if let Some(message) = message {
+            self.display_message(message)?;
         }
+        Ok(())
     }
 
     fn display_typed_message(&mut self, typ: MessageType, message: &str) -> Result<()> {
@@ -376,7 +391,7 @@ fn request_id(message: &IncomingMessage) -> Result<&Value> {
     message
         .id
         .as_ref()
-        .ok_or_else(|| Error::Protocol(SERVER_REQUEST_WITHOUT_ID_MESSAGE.to_string()))
+        .ok_or_else(|| ProtocolError::MissingServerRequestId.into())
 }
 
 fn write_message(writer: &mut impl Write, message: &impl Serialize) -> Result<()> {
@@ -405,23 +420,20 @@ fn read_message<T: for<'de> Deserialize<'de>>(reader: &mut impl BufRead) -> Resu
         let (name, value) = line
             .trim_end_matches(['\r', '\n'])
             .split_once(':')
-            .ok_or_else(|| Error::Protocol(format!("Malformed header: {line:?}")))?;
+            .ok_or_else(|| ProtocolError::MalformedHeader(line.clone()))?;
         if name.eq_ignore_ascii_case(CONTENT_LENGTH) {
             content_length = Some(
                 value
                     .trim()
                     .parse::<usize>()
-                    .map_err(|_| Error::Protocol("Invalid Content-Length".to_string()))?,
+                    .map_err(|_| ProtocolError::InvalidContentLength)?,
             );
         }
     }
 
-    let content_length = content_length
-        .ok_or_else(|| Error::Protocol("Missing Content-Length header".to_string()))?;
+    let content_length = content_length.ok_or(ProtocolError::MissingContentLength)?;
     if content_length > MAX_MESSAGE_SIZE {
-        return Err(Error::Protocol(format!(
-            "Message exceeds {MAX_MESSAGE_SIZE} byte limit"
-        )));
+        return Err(ProtocolError::MessageTooLarge.into());
     }
 
     let mut body = vec![0; content_length];
@@ -460,11 +472,6 @@ mod tests {
     const PROGRESS_END_MESSAGE: &str = "end message";
     const TEST_WAIT_TIMEOUT: Duration = Duration::from_millis(10);
     const TEST_READER_DELAY: Duration = Duration::from_millis(50);
-    const ERROR_LOG_LEVEL: LogLevel = LogLevel::Error;
-    const WARN_LOG_LEVEL: LogLevel = LogLevel::Warn;
-    const INFO_LOG_LEVEL: LogLevel = LogLevel::Info;
-    const DEBUG_LOG_LEVEL: LogLevel = LogLevel::Debug;
-
     #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
     struct Payload {
         text: String,
@@ -574,6 +581,36 @@ mod tests {
         })
     }
 
+    fn progress_begin(token: &str, title: &str, message: &str) -> Value {
+        progress(
+            token,
+            WorkDoneProgress::Begin(WorkDoneProgressBegin {
+                title: title.to_owned(),
+                message: Some(message.to_owned()),
+                ..Default::default()
+            }),
+        )
+    }
+
+    fn progress_report(token: &str, message: &str) -> Value {
+        progress(
+            token,
+            WorkDoneProgress::Report(WorkDoneProgressReport {
+                message: Some(message.to_owned()),
+                ..Default::default()
+            }),
+        )
+    }
+
+    fn progress_end(token: &str, message: &str) -> Value {
+        progress(
+            token,
+            WorkDoneProgress::End(WorkDoneProgressEnd {
+                message: Some(message.to_owned()),
+            }),
+        )
+    }
+
     fn show_message(typ: MessageType, message: &str) -> Value {
         notification::<ShowMessage>(ShowMessageParams {
             typ,
@@ -590,6 +627,10 @@ mod tests {
         (0..count)
             .map(|_| read_message(&mut reader).unwrap())
             .collect()
+    }
+
+    fn assert_protocol_error(error: Error, expected: ProtocolError) {
+        assert!(matches!(error, Error::Protocol(actual) if actual == expected));
     }
 
     fn test_connection(
@@ -624,40 +665,11 @@ mod tests {
 
     fn progress_notifications() -> Vec<Value> {
         vec![
-            progress(
-                PROGRESS_TOKEN,
-                WorkDoneProgress::Begin(WorkDoneProgressBegin {
-                    title: PROGRESS_TITLE.to_owned(),
-                    message: Some(PROGRESS_BEGIN_MESSAGE.to_owned()),
-                    ..Default::default()
-                }),
-            ),
-            progress(
-                PROGRESS_TOKEN,
-                WorkDoneProgress::Report(WorkDoneProgressReport {
-                    message: Some(PROGRESS_REPORT_MESSAGE.to_owned()),
-                    ..Default::default()
-                }),
-            ),
-            progress(
-                PROGRESS_TOKEN,
-                WorkDoneProgress::Report(WorkDoneProgressReport {
-                    message: Some(SHORT_PROGRESS_REPORT_MESSAGE.to_owned()),
-                    ..Default::default()
-                }),
-            ),
-            progress(
-                OTHER_PROGRESS_TOKEN,
-                WorkDoneProgress::End(WorkDoneProgressEnd {
-                    message: Some(OTHER_PROGRESS_END_MESSAGE.to_owned()),
-                }),
-            ),
-            progress(
-                PROGRESS_TOKEN,
-                WorkDoneProgress::End(WorkDoneProgressEnd {
-                    message: Some(PROGRESS_END_MESSAGE.to_owned()),
-                }),
-            ),
+            progress_begin(PROGRESS_TOKEN, PROGRESS_TITLE, PROGRESS_BEGIN_MESSAGE),
+            progress_report(PROGRESS_TOKEN, PROGRESS_REPORT_MESSAGE),
+            progress_report(PROGRESS_TOKEN, SHORT_PROGRESS_REPORT_MESSAGE),
+            progress_end(OTHER_PROGRESS_TOKEN, OTHER_PROGRESS_END_MESSAGE),
+            progress_end(PROGRESS_TOKEN, PROGRESS_END_MESSAGE),
         ]
     }
 
@@ -683,9 +695,46 @@ mod tests {
         let message = Payload {
             text: String::from("Grüße 👋"),
         };
+        let body = serde_json::to_vec(&message).unwrap();
         let encoded = frame(&message);
-        let decoded: Payload = read_message(&mut Cursor::new(encoded)).unwrap();
-        assert_eq!(decoded, message);
+        let expected_header = format!("{CONTENT_LENGTH}: {}\r\n\r\n", body.len());
+
+        assert_eq!(encoded, [expected_header.as_bytes(), &body].concat());
+    }
+
+    #[test]
+    fn reads_independently_constructed_frame_and_case_insensitive_header() {
+        const BODY: &[u8] = br#"{"text":"manual frame"}"#;
+        let header = format!("content-length: {}\r\n\r\n", BODY.len());
+        let input = [header.as_bytes(), BODY].concat();
+
+        let payload: Payload = read_message(&mut Cursor::new(input)).unwrap();
+
+        assert_eq!(payload.text, "manual frame");
+    }
+
+    #[test]
+    fn rejects_malformed_content_length_headers() {
+        let cases = [
+            (b"\r\n".as_slice(), ProtocolError::MissingContentLength),
+            (
+                b"Content-Length: nope\r\n\r\n".as_slice(),
+                ProtocolError::InvalidContentLength,
+            ),
+            (
+                b"Content-Length 2\r\n\r\n".as_slice(),
+                ProtocolError::MalformedHeader("Content-Length 2\r\n".to_owned()),
+            ),
+        ];
+
+        for (input, expected) in cases {
+            let error = read_message::<Value>(&mut Cursor::new(input)).unwrap_err();
+            assert_protocol_error(error, expected);
+        }
+
+        let oversized = format!("{CONTENT_LENGTH}: {}\r\n\r\n", MAX_MESSAGE_SIZE + 1);
+        let error = read_message::<Value>(&mut Cursor::new(oversized)).unwrap_err();
+        assert_protocol_error(error, ProtocolError::MessageTooLarge);
     }
 
     #[test]
@@ -704,36 +753,18 @@ mod tests {
                 typ: MessageType::LOG,
                 message: LOG_MESSAGE_TEXT.to_owned(),
             }),
-            progress(
-                PROGRESS_TOKEN,
-                WorkDoneProgress::Begin(WorkDoneProgressBegin {
-                    title: PROGRESS_TITLE.to_owned(),
-                    message: Some(PROGRESS_BEGIN_MESSAGE.to_owned()),
-                    ..Default::default()
-                }),
-            ),
-            progress(
-                PROGRESS_TOKEN,
-                WorkDoneProgress::Report(WorkDoneProgressReport {
-                    message: Some(PROGRESS_REPORT_MESSAGE.to_owned()),
-                    ..Default::default()
-                }),
-            ),
-            progress(
-                PROGRESS_TOKEN,
-                WorkDoneProgress::End(WorkDoneProgressEnd {
-                    message: Some(PROGRESS_END_MESSAGE.to_owned()),
-                }),
-            ),
+            progress_begin(PROGRESS_TOKEN, PROGRESS_TITLE, PROGRESS_BEGIN_MESSAGE),
+            progress_report(PROGRESS_TOKEN, PROGRESS_REPORT_MESSAGE),
+            progress_end(PROGRESS_TOKEN, PROGRESS_END_MESSAGE),
         ];
 
-        assert!(server_message_output(&messages, ERROR_LOG_LEVEL).is_empty());
+        assert!(server_message_output(&messages, LogLevel::Error).is_empty());
         assert_eq!(
-            server_message_output(&messages, WARN_LOG_LEVEL),
+            server_message_output(&messages, LogLevel::Warn),
             output_lines(&[ERROR_MESSAGE_TEXT, WARNING_MESSAGE_TEXT])
         );
         assert_eq!(
-            server_message_output(&messages, INFO_LOG_LEVEL),
+            server_message_output(&messages, LogLevel::Info),
             output_lines(&[
                 ERROR_MESSAGE_TEXT,
                 WARNING_MESSAGE_TEXT,
@@ -742,7 +773,7 @@ mod tests {
             ])
         );
         assert_eq!(
-            server_message_output(&messages, DEBUG_LOG_LEVEL),
+            server_message_output(&messages, LogLevel::Debug),
             output_lines(&[
                 ERROR_MESSAGE_TEXT,
                 WARNING_MESSAGE_TEXT,
@@ -787,7 +818,7 @@ mod tests {
             client_response(CLIENT_REQUEST_ID, &expected_response),
         ]);
         let (mut connection, protocol_output, message_output) =
-            test_connection(incoming, DEBUG_LOG_LEVEL);
+            test_connection(incoming, LogLevel::Debug);
 
         let response = connection
             .request::<TestRequest>(Payload {
@@ -825,7 +856,7 @@ mod tests {
             }),
             client_response(CLIENT_REQUEST_ID, &expected_response),
         ]);
-        let (mut connection, _, message_output) = test_connection(incoming, INFO_LOG_LEVEL);
+        let (mut connection, _, message_output) = test_connection(incoming, LogLevel::Info);
 
         let response = connection
             .request::<TestRequest>(expected_response.clone())
@@ -836,8 +867,98 @@ mod tests {
     }
 
     #[test]
+    fn unknown_server_requests_receive_method_not_found() {
+        const REQUEST_ID: u64 = 99;
+        let message: IncomingMessage = serde_json::from_value(json!({
+            "jsonrpc": JSON_RPC_VERSION,
+            "id": REQUEST_ID,
+            "method": TestRequest::METHOD,
+            "params": {},
+        }))
+        .unwrap();
+        let (mut connection, protocol_output, _) = test_connection(Vec::new(), LogLevel::Error);
+
+        assert!(connection.handle_incoming(message).unwrap().is_none());
+
+        let response = read_values(protocol_output.bytes(), 1).remove(0);
+        assert_eq!(response["id"], REQUEST_ID);
+        assert_eq!(response["error"]["code"], METHOD_NOT_FOUND_CODE);
+        assert_eq!(response["error"]["message"], METHOD_NOT_FOUND_MESSAGE);
+    }
+
+    #[test]
+    fn server_requests_require_an_id() {
+        let message: IncomingMessage = serde_json::from_value(json!({
+            "jsonrpc": JSON_RPC_VERSION,
+            "method": ShowMessageRequest::METHOD,
+            "params": {
+                "type": MessageType::INFO,
+                "message": SHOW_MESSAGE_REQUEST_TEXT,
+            },
+        }))
+        .unwrap();
+        let (mut connection, _, _) = test_connection(Vec::new(), LogLevel::Error);
+
+        let error = connection.handle_incoming(message).unwrap_err();
+
+        assert_protocol_error(error, ProtocolError::MissingServerRequestId);
+    }
+
+    #[test]
+    fn rejects_mismatched_response_ids() {
+        let response = Payload {
+            text: TEST_PAYLOAD_TEXT.to_owned(),
+        };
+        let incoming = frame(&client_response(CLIENT_REQUEST_ID + 1, &response));
+        let (mut connection, _, _) = test_connection(incoming, LogLevel::Error);
+
+        let error = connection.request::<TestRequest>(response).unwrap_err();
+
+        assert_protocol_error(
+            error,
+            ProtocolError::MismatchedResponse {
+                received: CLIENT_REQUEST_ID + 1,
+                expected: CLIENT_REQUEST_ID,
+            },
+        );
+    }
+
+    #[test]
+    fn rejects_responses_while_waiting_for_progress() {
+        let incoming = frame(&client_response(CLIENT_REQUEST_ID, &Value::Null));
+        let (mut connection, _, _) = test_connection(incoming, LogLevel::Error);
+
+        let error = connection
+            .wait_for_progress(TEST_WAIT_TIMEOUT, TEST_WAIT_TIMEOUT)
+            .unwrap_err();
+
+        assert_protocol_error(error, ProtocolError::ResponseDuringProgress);
+    }
+
+    #[test]
+    fn progress_timeout_clears_unfinished_tokens() {
+        let incoming = frame(&progress_begin(
+            PROGRESS_TOKEN,
+            PROGRESS_TITLE,
+            PROGRESS_BEGIN_MESSAGE,
+        ));
+        let mut connection = Connection::from_io(
+            DelayedEofReader::new(incoming, TEST_READER_DELAY),
+            SharedBuffer::default(),
+            SharedBuffer::default(),
+            LogLevel::Error,
+        );
+
+        connection
+            .wait_for_progress(TEST_WAIT_TIMEOUT, TEST_WAIT_TIMEOUT)
+            .unwrap();
+
+        assert!(connection.active_progress.is_empty());
+    }
+
+    #[test]
     fn info_waits_for_matching_progress_end_and_only_shows_title() {
-        let (connection, output) = wait_for_test_progress(INFO_LOG_LEVEL);
+        let (connection, output) = wait_for_test_progress(LogLevel::Info);
 
         assert!(connection.active_progress.is_empty());
         assert_eq!(output, output_lines(&[PROGRESS_TITLE]));
@@ -845,7 +966,7 @@ mod tests {
 
     #[test]
     fn shows_progress_details_with_debug() {
-        let (connection, output) = wait_for_test_progress(DEBUG_LOG_LEVEL);
+        let (connection, output) = wait_for_test_progress(LogLevel::Debug);
 
         assert!(connection.active_progress.is_empty());
         assert_eq!(

@@ -1,5 +1,6 @@
 mod rpc;
 
+use arborium::advanced::Span;
 use lsp_types::notification::{DidCloseTextDocument, DidOpenTextDocument, Exit, Initialized};
 use lsp_types::request::{Initialize, SemanticTokensFullRequest, Shutdown};
 use lsp_types::{
@@ -23,9 +24,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use thiserror::Error;
 
+use crate::LangName;
 use crate::logging::LogLevel;
-
-pub type LangName = Rc<str>;
 
 const FILE_URI_PREFIX: &str = "file://";
 const TEMP_FILE_PREFIX: &str = "lighter";
@@ -34,6 +34,19 @@ const MAX_TEMP_FILE_ATTEMPTS: usize = 100;
 const URI_HEX_DIGITS: &[u8; 16] = b"0123456789ABCDEF";
 const DOCUMENT_OPEN_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 const PROGRESS_END_WAIT_TIMEOUT: Duration = Duration::from_secs(15);
+const TYPE_TOKEN_TYPES: &[SemanticTokenType] = &[
+    SemanticTokenType::CLASS,
+    SemanticTokenType::INTERFACE,
+    SemanticTokenType::STRUCT,
+];
+const TOKEN_CAPTURE_MAPPINGS: &[(SemanticTokenType, &str)] = &[
+    (SemanticTokenType::TYPE_PARAMETER, "type.parameter"),
+    (SemanticTokenType::PARAMETER, "variable.parameter"),
+    (SemanticTokenType::ENUM, "type.enum"),
+    (SemanticTokenType::ENUM_MEMBER, "type.enum.variant"),
+    (SemanticTokenType::MODIFIER, "keyword.modifier"),
+    (SemanticTokenType::REGEXP, "string.regexp"),
+];
 
 static NEXT_TEMP_FILE_ID: AtomicUsize = AtomicUsize::new(0);
 
@@ -51,17 +64,30 @@ pub enum Error {
     InvalidProjectDirectory(PathBuf),
     #[error(transparent)]
     Rpc(#[from] rpc::Error),
+    #[error("Language server for '{0}' does not provide semantic tokens")]
+    NoSemanticTokens(String),
 }
 
-type Result<T> = std::result::Result<T, Error>;
+pub type CaptureMappings = HashMap<LangName, HashMap<String, String>>;
+pub type Commands = HashMap<LangName, CommandEntry>;
+pub type Result<T> = std::result::Result<T, Error>;
 
 /// A single LSP server entry.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandEntry {
     /// The executable name or path (e.g. "rust-analyzer").
     pub command: String,
     /// Arguments passed to the server (e.g. `["--stdio"]`).
     pub args: Vec<String>,
+}
+
+impl CommandEntry {
+    pub fn new<S: AsRef<str>>(command: &str, args: &[S]) -> Self {
+        Self {
+            command: command.to_owned(),
+            args: args.iter().map(|arg| arg.as_ref().to_owned()).collect(),
+        }
+    }
 }
 
 /// Default server commands
@@ -98,22 +124,15 @@ pub fn default_commands() -> HashMap<LangName, CommandEntry> {
 
     entries
         .iter()
-        .map(|(lang, cmd, args)| {
-            (
-                Rc::from(*lang),
-                CommandEntry {
-                    command: (*cmd).to_string(),
-                    args: args.iter().map(|a| (*a).to_string()).collect(),
-                },
-            )
-        })
+        .map(|(language, command, args)| (Rc::from(*language), CommandEntry::new(command, args)))
         .collect()
 }
 
 #[derive(Debug, Default)]
 pub struct ServerRegistry {
     clients: HashMap<LangName, Client>,
-    commands: HashMap<LangName, CommandEntry>,
+    commands: Commands,
+    mappings: CaptureMappings,
     project: Option<Project>,
     log: LogLevel,
 }
@@ -121,30 +140,37 @@ pub struct ServerRegistry {
 impl ServerRegistry {
     pub fn new(
         commands: HashMap<LangName, CommandEntry>,
+        mappings: HashMap<LangName, HashMap<String, String>>,
         project: Option<&Path>,
         log: LogLevel,
     ) -> Result<Self> {
-        Ok(ServerRegistry {
+        Ok(Self {
             commands,
+            mappings,
             project: project.map(Project::new).transpose()?,
             log,
-            ..Default::default()
+            clients: HashMap::new(),
         })
     }
-}
 
-impl<'a> ServerRegistry {
-    pub fn get_server(&'a mut self, lang: LangName) -> Result<Server<'a>> {
-        if !self.clients.contains_key(&lang) {
-            if let Some(command_entry) = self.commands.get(&lang) {
-                let client = Client::new(command_entry, &lang, self.project.as_ref(), self.log)?;
-                self.clients.insert(lang.clone(), client);
-            } else {
-                return Err(Error::NoServer(lang.to_string()));
+    pub fn get_server(&mut self, lang: LangName) -> Result<Server<'_>> {
+        let client = match self.clients.entry(lang.clone()) {
+            std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                let command = self
+                    .commands
+                    .get(&lang)
+                    .ok_or_else(|| Error::NoServer(lang.to_string()))?;
+                entry.insert(Client::new(
+                    command,
+                    &lang,
+                    self.project.as_ref(),
+                    self.log,
+                )?)
             }
-        }
-        let client = self.clients.get(&lang).expect("Client was initialized");
-        Ok(Server { client })
+        };
+        let mapping = self.mappings.entry(lang).or_insert_with(|| HashMap::new());
+        Ok(Server { client, mapping })
     }
 }
 
@@ -176,27 +202,36 @@ impl Project {
 
 pub struct Server<'a> {
     client: &'a Client,
+    mapping: &'a HashMap<String, String>,
 }
 
 impl Server<'_> {
-    pub fn get_semantic_tokens(
+    pub fn get_semantic_spans(
         &self,
         input: &str,
         path: Option<&Path>,
-    ) -> Result<Option<(Vec<SemanticToken>, SemanticTokensLegend)>> {
-        self.client.get_semantic_tokens(input, path)
+        pattern_index: u32,
+    ) -> Result<Vec<Span>> {
+        let tokens = self.client.get_semantic_tokens(input, path)?;
+        Ok(semantic_tokens_to_spans(
+            input,
+            &tokens,
+            &self.client.semantic_tokens_legend,
+            pattern_index,
+            self.mapping,
+        ))
     }
 }
 
 #[derive(Debug)]
 struct Document {
     uri: Uri,
-    temporary_document: Option<TemporaryDocument>,
+    _temporary: Option<TemporaryDocument>,
 }
 
 impl Document {
-    fn new(text: &str, path: Option<&Path>, language: &str) -> Result<Document> {
-        let (path, temporary_path) = match path {
+    fn new(text: &str, path: Option<&Path>, language: &str) -> Result<Self> {
+        let (path, temporary) = match path {
             Some(path) => (fs::canonicalize(path)?, None),
             None => {
                 let temporary_document = create_temporary_document(text, language)?;
@@ -204,16 +239,10 @@ impl Document {
             }
         };
 
-        Ok(Document {
+        Ok(Self {
             uri: file_uri(&path)?,
-            temporary_document: temporary_path,
+            _temporary: temporary,
         })
-    }
-}
-
-impl Drop for Document {
-    fn drop(&mut self) {
-        drop(self.temporary_document.take());
     }
 }
 
@@ -239,7 +268,7 @@ struct Connection {
 struct Client {
     connection: Mutex<Connection>,
     language: String,
-    semantic_tokens_legend: Option<SemanticTokensLegend>,
+    semantic_tokens_legend: SemanticTokensLegend,
 }
 
 impl Client {
@@ -248,18 +277,19 @@ impl Client {
         language: &str,
         project: Option<&Project>,
         log: LogLevel,
-    ) -> Result<Client> {
-        let mut connection = Client::spawn_server(command_entry, project, log)?;
-        let semantic_tokens_legend = match Client::initialize(&mut connection.rpc, project) {
-            Ok(legend) => legend,
+    ) -> Result<Self> {
+        let mut connection = Self::spawn_server(command_entry, project, log)?;
+        let semantic_tokens_legend = match Self::initialize(&mut connection.rpc, project) {
+            Ok(None) => Err(Error::NoSemanticTokens(language.to_string())),
+            Ok(Some(legend)) => Ok(legend),
             Err(error) => {
                 let _ = connection.child.kill();
                 let _ = connection.child.wait();
                 return Err(error);
             }
-        };
+        }?;
 
-        Ok(Client {
+        Ok(Self {
             connection: Mutex::new(connection),
             language: language.to_string(),
             semantic_tokens_legend,
@@ -307,15 +337,7 @@ impl Client {
             .and_then(full_semantic_tokens_legend))
     }
 
-    fn get_semantic_tokens(
-        &self,
-        text: &str,
-        path: Option<&Path>,
-    ) -> Result<Option<(Vec<SemanticToken>, SemanticTokensLegend)>> {
-        let Some(legend) = self.semantic_tokens_legend.clone() else {
-            return Ok(None);
-        };
-
+    fn get_semantic_tokens(&self, text: &str, path: Option<&Path>) -> Result<Vec<SemanticToken>> {
         let document = Document::new(text, path, &self.language)?;
         let uri = document.uri.clone();
         let mut connection = self.connection.lock().expect("Connection lock poisoned");
@@ -342,7 +364,8 @@ impl Client {
                 partial_result_params: PartialResultParams::default(),
             })
             .map(|response| {
-                response.map(|result| match result {
+                // TODO: should we act on a None result?
+                response.map_or(Vec::new(), |result| match result {
                     SemanticTokensResult::Tokens(tokens) => tokens.data,
                     SemanticTokensResult::Partial(tokens) => tokens.data,
                 })
@@ -355,10 +378,9 @@ impl Client {
                     text_document: TextDocumentIdentifier::new(uri),
                 });
 
-        match (token_result, close_result) {
-            (Err(error), _) | (Ok(_), Err(error)) => Err(error.into()),
-            (Ok(tokens), Ok(())) => Ok(tokens.map(|tokens| (tokens, legend))),
-        }
+        let tokens = token_result?;
+        close_result?;
+        Ok(tokens)
     }
 }
 
@@ -484,7 +506,9 @@ fn document_extension(language: &str) -> &str {
         "haskell" => "hs",
         "ocaml" => "ml",
         "latex" => "tex",
-        other if other.bytes().all(|byte| byte.is_ascii_alphanumeric()) => other,
+        other if !other.is_empty() && other.bytes().all(|byte| byte.is_ascii_alphanumeric()) => {
+            other
+        }
         _ => DEFAULT_DOCUMENT_EXTENSION,
     }
 }
@@ -550,10 +574,133 @@ fn full_semantic_tokens_legend(
     }
 }
 
+fn semantic_tokens_to_spans(
+    source: &str,
+    tokens: &[SemanticToken],
+    legend: &SemanticTokensLegend,
+    pattern_index: u32,
+    captures: &HashMap<String, String>,
+) -> Vec<Span> {
+    let lines = LineIndex::new(source);
+    let mut line = 0_u32;
+    let mut character = 0_u32;
+
+    tokens
+        .iter()
+        .filter_map(|token| {
+            line = line.checked_add(token.delta_line)?;
+            character = if token.delta_line == 0 {
+                character.checked_add(token.delta_start)?
+            } else {
+                token.delta_start
+            };
+
+            let token_type = legend.token_types.get(token.token_type as usize)?;
+            let (start, end) = lines.byte_range(line, character, token.length)?;
+
+            Some(Span {
+                start: u32::try_from(start).ok()?,
+                end: u32::try_from(end).ok()?,
+                capture: capture_for_token_type(token_type, captures).to_owned(),
+                pattern_index,
+            })
+        })
+        .collect()
+}
+
+fn capture_for_token_type<'a>(
+    token_type: &'a SemanticTokenType,
+    captures: &'a HashMap<String, String>,
+) -> &'a str {
+    captures
+        .get(token_type.as_str())
+        .map(|capture| capture.as_str())
+        .unwrap_or_else(|| default_capture_for_token_type(token_type))
+}
+
+fn default_capture_for_token_type(token_type: &SemanticTokenType) -> &str {
+    if TYPE_TOKEN_TYPES.contains(token_type) {
+        return "type";
+    }
+
+    if let Some(capture) = TOKEN_CAPTURE_MAPPINGS
+        .iter()
+        .find_map(|(candidate, capture)| (candidate == token_type).then_some(*capture))
+    {
+        return capture;
+    }
+
+    // NOTE: currently unsupported default LSP token types are `event` and `decorator`.
+    token_type.as_str()
+}
+
+struct LineIndex<'source> {
+    source: &'source str,
+    starts: Vec<usize>,
+}
+
+impl<'source> LineIndex<'source> {
+    fn new(source: &'source str) -> Self {
+        let mut starts = vec![0];
+        starts.extend(
+            source
+                .bytes()
+                .enumerate()
+                .filter(|(_, byte)| *byte == b'\n')
+                .map(|(index, _)| index + 1),
+        );
+        Self { source, starts }
+    }
+
+    fn byte_range(&self, line: u32, character: u32, length: u32) -> Option<(usize, usize)> {
+        let line = usize::try_from(line).ok()?;
+        let start = *self.starts.get(line)?;
+        let mut end = self
+            .starts
+            .get(line + 1)
+            .copied()
+            .unwrap_or(self.source.len());
+
+        if self.source.as_bytes().get(end.wrapping_sub(1)) == Some(&b'\n') {
+            end -= 1;
+        }
+        if self.source.as_bytes().get(end.wrapping_sub(1)) == Some(&b'\r') {
+            end -= 1;
+        }
+
+        let line_source = self.source.get(start..end)?;
+        let token_end = character.checked_add(length)?;
+        let relative_start = utf16_column_to_byte(line_source, character)?;
+        let relative_end = utf16_column_to_byte(line_source, token_end)?;
+
+        (relative_start < relative_end).then(|| (start + relative_start, start + relative_end))
+    }
+}
+
+fn utf16_column_to_byte(line: &str, column: u32) -> Option<usize> {
+    let mut utf16_column = 0_u32;
+
+    for (byte, character) in line.char_indices() {
+        if utf16_column == column {
+            return Some(byte);
+        }
+
+        utf16_column = utf16_column.checked_add(character.len_utf16() as u32)?;
+        if utf16_column > column {
+            return None;
+        }
+    }
+
+    (utf16_column == column).then_some(line.len())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lsp_types::{SemanticTokensOptions, WorkDoneProgressOptions};
+    use lsp_types::{
+        SemanticTokensOptions, SemanticTokensRegistrationOptions, StaticRegistrationOptions,
+        TextDocumentRegistrationOptions, WorkDoneProgressOptions,
+    };
 
     const TEST_ARGUMENT: &str = "--stdio";
     const TEST_COMMAND: &str = "language-server";
@@ -564,9 +711,18 @@ mod tests {
     }
 
     fn test_command_entry() -> CommandEntry {
-        CommandEntry {
-            command: TEST_COMMAND.to_owned(),
-            args: vec![TEST_ARGUMENT.to_owned()],
+        CommandEntry::new(TEST_COMMAND, &[TEST_ARGUMENT])
+    }
+
+    fn semantic_options(
+        legend: &SemanticTokensLegend,
+        full: Option<SemanticTokensFullOptions>,
+    ) -> SemanticTokensOptions {
+        SemanticTokensOptions {
+            work_done_progress_options: WorkDoneProgressOptions::default(),
+            legend: legend.clone(),
+            range: None,
+            full,
         }
     }
 
@@ -576,26 +732,26 @@ mod tests {
             token_types: vec![SemanticTokenType::FUNCTION],
             token_modifiers: Vec::new(),
         };
-        let capability = |full| {
-            SemanticTokensServerCapabilities::SemanticTokensOptions(SemanticTokensOptions {
-                work_done_progress_options: WorkDoneProgressOptions::default(),
-                legend: legend.clone(),
-                range: None,
-                full,
-            })
-        };
+        let capability = |full| semantic_options(&legend, full).into();
 
-        assert!(full_semantic_tokens_legend(capability(None)).is_none());
-        assert!(
-            full_semantic_tokens_legend(capability(Some(SemanticTokensFullOptions::Bool(false))))
-                .is_none()
-        );
-        assert_eq!(
-            full_semantic_tokens_legend(capability(Some(SemanticTokensFullOptions::Bool(true))))
-                .unwrap()
-                .token_types[0],
-            SemanticTokenType::FUNCTION
-        );
+        for unsupported in [None, Some(SemanticTokensFullOptions::Bool(false))] {
+            assert!(full_semantic_tokens_legend(capability(unsupported)).is_none());
+        }
+
+        let registration = SemanticTokensRegistrationOptions {
+            text_document_registration_options: TextDocumentRegistrationOptions::default(),
+            semantic_tokens_options: semantic_options(
+                &legend,
+                Some(SemanticTokensFullOptions::Delta { delta: Some(true) }),
+            ),
+            static_registration_options: StaticRegistrationOptions::default(),
+        };
+        for supported in [
+            capability(Some(SemanticTokensFullOptions::Bool(true))),
+            SemanticTokensServerCapabilities::SemanticTokensRegistrationOptions(registration),
+        ] {
+            assert_eq!(full_semantic_tokens_legend(supported), Some(legend.clone()));
+        }
     }
 
     #[test]
@@ -617,11 +773,30 @@ mod tests {
     }
 
     #[test]
+    fn document_extensions_are_safe_and_language_appropriate() {
+        let cases = [
+            ("rust", "rs"),
+            ("typescript", "ts"),
+            ("csharp", "cs"),
+            ("gleam", "gleam"),
+            ("../rust", DEFAULT_DOCUMENT_EXTENSION),
+            ("", DEFAULT_DOCUMENT_EXTENSION),
+        ];
+
+        for (language, expected) in cases {
+            assert_eq!(document_extension(language), expected);
+        }
+    }
+
+    #[test]
     fn temporary_rust_document_is_file_backed_and_removed_on_drop() {
         let document = Document::new(TEST_SOURCE, None, "rust").unwrap();
-        let path = document.temporary_document.as_ref().unwrap().path.clone();
+        let path = document._temporary.as_ref().unwrap().path.clone();
+        let other_document = Document::new(TEST_SOURCE, None, "rust").unwrap();
+        let other_path = other_document._temporary.as_ref().unwrap().path.clone();
 
         assert!(document.uri.as_str().starts_with(FILE_URI_PREFIX));
+        assert_ne!(path, other_path);
         assert_eq!(
             path.extension().and_then(|value| value.to_str()),
             Some("rs")
@@ -630,6 +805,7 @@ mod tests {
 
         drop(document);
         assert!(!path.exists());
+        assert!(other_path.exists());
     }
 
     #[test]
@@ -659,5 +835,25 @@ mod tests {
         assert!(params.root_uri.is_none());
         assert!(params.workspace_folders.is_none());
         assert!(params.capabilities.workspace.is_none());
+    }
+
+    #[test]
+    fn maps_lsp_token_types_to_supported_capture_names() {
+        let cases = [
+            (SemanticTokenType::CLASS, "type"),
+            (SemanticTokenType::INTERFACE, "type"),
+            (SemanticTokenType::STRUCT, "type"),
+            (SemanticTokenType::TYPE_PARAMETER, "type.parameter"),
+            (SemanticTokenType::PARAMETER, "variable.parameter"),
+            (SemanticTokenType::ENUM, "type.enum"),
+            (SemanticTokenType::ENUM_MEMBER, "type.enum.variant"),
+            (SemanticTokenType::MODIFIER, "keyword.modifier"),
+            (SemanticTokenType::REGEXP, "string.regexp"),
+            (SemanticTokenType::EVENT, "event"),
+        ];
+
+        for (token_type, expected) in cases {
+            assert_eq!(default_capture_for_token_type(&token_type), expected);
+        }
     }
 }
