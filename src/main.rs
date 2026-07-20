@@ -52,6 +52,10 @@ struct CliInterface {
     #[arg(short, long, value_enum, default_value_t = lighter::Output::Ansi)]
     format: lighter::Output,
 
+    /// Inclusive, one-based line range to output (start:end, :end, or start:).
+    #[arg(long, value_name = "RANGE")]
+    lines: Option<lighter::LineRange>,
+
     /// Disable LSP semantic highlighting.
     #[arg(long)]
     no_lsp: bool,
@@ -268,6 +272,7 @@ struct CliOptions {
     project: Option<PathBuf>,
     log: logging::LogLevel,
     format: lighter::Output,
+    lines: Option<lighter::LineRange>,
     no_tree_sitter: bool,
 }
 
@@ -282,6 +287,7 @@ impl TryFrom<CliInterface> for CliOptions {
             file,
             project,
             format,
+            lines,
             no_tree_sitter,
             log,
             ..
@@ -295,6 +301,7 @@ impl TryFrom<CliInterface> for CliOptions {
             project,
             log,
             format,
+            lines,
             no_tree_sitter,
         })
     }
@@ -398,6 +405,7 @@ fn main() -> Result<()> {
             output: options.format,
             tree_sitter: !options.no_tree_sitter,
             theme: options.theme,
+            lines: options.lines,
         },
         options.log,
     );
@@ -421,6 +429,7 @@ mod tests {
         CustomTheme,
         Format,
         Lang,
+        Lines,
         Project,
         Log,
         Theme,
@@ -433,6 +442,7 @@ mod tests {
                 CliArgs::CustomTheme => "--custom-theme",
                 CliArgs::Format => "--format",
                 CliArgs::Lang => "--lang",
+                CliArgs::Lines => "--lines",
                 CliArgs::Log => "--log",
                 CliArgs::Project => "--project",
                 CliArgs::Theme => "--theme",
@@ -572,6 +582,24 @@ mod tests {
         let options = parse_cli_value(CliArgs::Lang, language).unwrap();
 
         assert_eq!(options.lang.as_ref(), language);
+    }
+
+    #[test]
+    fn accept_line_range() {
+        let range = "2:4";
+        let options = parse_cli_value(CliArgs::Lines, range).unwrap();
+
+        assert_eq!(options.lines, Some(range.parse().unwrap()));
+    }
+
+    #[test]
+    fn reject_invalid_line_range() {
+        let error = parse_cli_value(CliArgs::Lines, "4:2").unwrap_err();
+
+        assert_matches!(
+            error,
+            Error::Cli(error) if error.kind() == clap::error::ErrorKind::ValueValidation
+        );
     }
 
     #[test]

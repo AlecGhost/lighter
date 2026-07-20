@@ -1,7 +1,9 @@
 use std::cell::RefCell;
 use std::io::Write;
+use std::ops::Range;
 use std::path::Path;
 use std::rc::Rc;
+use std::str::FromStr;
 
 use arborium::advanced::{Span, spans_to_ansi, spans_to_html};
 use arborium::theme::Theme;
@@ -22,6 +24,48 @@ pub struct Input<'a> {
     pub lang: LangName,
 }
 
+/// An inclusive, one-based range of source lines to render.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub struct LineRange {
+    start: usize,
+    end: Option<usize>,
+}
+
+impl FromStr for LineRange {
+    type Err = LineRangeError;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        let (start, end) = value.split_once(':').ok_or(LineRangeError)?;
+        if start.is_empty() && end.is_empty() {
+            return Err(LineRangeError);
+        }
+
+        let start = parse_line_number(start)?.unwrap_or(1);
+        let end = parse_line_number(end)?;
+
+        match end {
+            Some(end) if end < start => Err(LineRangeError),
+            _ => Ok(Self { start, end }),
+        }
+    }
+}
+
+fn parse_line_number(value: &str) -> std::result::Result<Option<usize>, LineRangeError> {
+    match value {
+        "" => Ok(None),
+        value => value
+            .parse::<usize>()
+            .ok()
+            .filter(|line| *line > 0)
+            .map(Some)
+            .ok_or(LineRangeError),
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Error)]
+#[error("expected a one-based line range: start:end, :end, or start:")]
+pub struct LineRangeError;
+
 #[derive(Debug, Default, Clone, Copy, Eq, PartialEq, clap::ValueEnum)]
 pub enum Output {
     #[default]
@@ -34,6 +78,7 @@ pub struct HighlightOptions {
     pub output: Output,
     pub tree_sitter: bool,
     pub theme: Theme,
+    pub lines: Option<LineRange>,
 }
 
 impl Default for HighlightOptions {
@@ -42,6 +87,7 @@ impl Default for HighlightOptions {
             output: Output::Ansi,
             theme: arborium_theme::builtin::catppuccin_mocha(),
             tree_sitter: true,
+            lines: None,
         }
     }
 }
@@ -118,6 +164,7 @@ impl Highlighter {
             lsp_spans,
             self.options.output,
             &self.options.theme,
+            self.options.lines,
         ))
     }
 }
@@ -137,11 +184,55 @@ fn render(
     lsp_spans: Vec<Span>,
     output: Output,
     theme: &Theme,
+    lines: Option<LineRange>,
 ) -> String {
     let spans = merge_spans(tree_sitter_spans, lsp_spans);
+    let (source, spans) = match lines {
+        Some(lines) => select_lines(source, spans, lines),
+        None => (source, spans),
+    };
     match output {
         Output::Ansi => spans_to_ansi(source, spans, theme),
         Output::Html => spans_to_html(source, spans, &arborium::HtmlFormat::default()),
+    }
+}
+
+fn select_lines(source: &str, spans: Vec<Span>, lines: LineRange) -> (&str, Vec<Span>) {
+    let selected = lines.byte_range(source);
+    let offset = selected.start as u32;
+    let end = selected.end as u32;
+    let spans = spans
+        .into_iter()
+        .filter_map(|span| {
+            let start = span.start.max(offset);
+            let end = span.end.min(end);
+            (start < end).then(|| Span {
+                start: start - offset,
+                end: end - offset,
+                ..span
+            })
+        })
+        .collect();
+
+    (&source[selected], spans)
+}
+
+impl LineRange {
+    fn byte_range(self, source: &str) -> Range<usize> {
+        let line_start = |line| {
+            std::iter::once(0)
+                .chain(source.match_indices('\n').map(|(newline, _)| newline + 1))
+                .nth(line - 1)
+                .unwrap_or(source.len())
+        };
+        let start = line_start(self.start);
+        let end = self
+            .end
+            .and_then(|line| line.checked_add(1))
+            .map(line_start)
+            .unwrap_or(source.len());
+
+        start..end
     }
 }
 
@@ -224,10 +315,114 @@ mauve = "#010203"
             pattern_index: 0,
         }];
 
-        let rendered = render(source, spans, Vec::new(), Output::Ansi, &theme);
+        let rendered = render(source, spans, Vec::new(), Output::Ansi, &theme, None);
 
         assert!(rendered.contains("\u{1b}[38;2;1;2;3m"));
     }
+
+    #[test]
+    fn parses_supported_line_range_forms() {
+        let ranges = [
+            (
+                "2:4",
+                LineRange {
+                    start: 2,
+                    end: Some(4),
+                },
+            ),
+            (
+                ":4",
+                LineRange {
+                    start: 1,
+                    end: Some(4),
+                },
+            ),
+            (
+                "2:",
+                LineRange {
+                    start: 2,
+                    end: None,
+                },
+            ),
+        ];
+
+        ranges.into_iter().for_each(|(value, expected)| {
+            assert_eq!(value.parse(), Ok(expected), "failed to parse {value:?}");
+        });
+    }
+
+    #[test]
+    fn rejects_invalid_line_ranges() {
+        ["", ":", "1", "0:1", "1:0", "3:2", "a:2", "1:2:3"]
+            .into_iter()
+            .for_each(|value| {
+                assert_eq!(
+                    value.parse::<LineRange>(),
+                    Err(LineRangeError),
+                    "accepted {value:?}"
+                );
+            });
+    }
+
+    #[test]
+    fn selects_closed_and_open_line_ranges_at_utf8_boundaries() {
+        const SOURCE: &str = "one\nβeta\nthree\nfour";
+        let selections = [
+            ("2:3", "βeta\nthree\n"),
+            (":2", "one\nβeta\n"),
+            ("3:", "three\nfour"),
+            ("9:", ""),
+        ];
+
+        selections.into_iter().for_each(|(range, expected)| {
+            let (source, spans) = select_lines(SOURCE, Vec::new(), range.parse().unwrap());
+            assert_eq!(source, expected, "selected the wrong source for {range}");
+            assert!(spans.is_empty());
+        });
+    }
+
+    #[test]
+    fn clips_and_rebases_spans_to_selected_lines() {
+        const SOURCE: &str = "first\nsecond\nthird";
+        let spans = vec![
+            span(0, 5, "before", 0),
+            span(4, 8, "overlap-start", 1),
+            span(7, 12, "inside", 2),
+            span(11, 15, "overlap-end", 3),
+            span(14, 19, "after", 4),
+        ];
+
+        let (source, spans) = select_lines(SOURCE, spans, "2:2".parse().unwrap());
+
+        assert_eq!(source, "second\n");
+        assert_eq!(
+            spans,
+            vec![
+                span(0, 2, "overlap-start", 1),
+                span(1, 6, "inside", 2),
+                span(5, 7, "overlap-end", 3),
+            ]
+        );
+    }
+
+    #[test]
+    fn renders_only_selected_lines_for_each_output_format() {
+        const SOURCE: &str = "first\nsecond\nthird";
+        let theme = Theme::from_toml(THEME_SOURCE).unwrap();
+
+        [Output::Ansi, Output::Html].into_iter().for_each(|output| {
+            let rendered = render(
+                SOURCE,
+                Vec::new(),
+                Vec::new(),
+                output,
+                &theme,
+                Some("2:2".parse().unwrap()),
+            );
+            assert_eq!(rendered, "second");
+        });
+    }
+
     fn assert_ordered(text: &str, first: &str, second: &str) {
         assert!(
             text.find(first).unwrap() < text.find(second).unwrap(),
