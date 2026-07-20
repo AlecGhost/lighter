@@ -1,4 +1,3 @@
-use anyhow::{Context, Result, anyhow, bail};
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Read};
@@ -8,8 +7,11 @@ use lighter::logging;
 use lighter::lsp;
 
 use clap::Parser;
+use thiserror::Error;
 
 const BIN_NAME: &str = "lighter";
+
+type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Parser, Debug)]
 #[command(name = BIN_NAME, version, about)]
@@ -75,6 +77,63 @@ fn builtin_theme_parser() -> clap::builder::PossibleValuesParser {
     )
 }
 
+#[derive(Error, Debug)]
+enum Error {
+    #[error(transparent)]
+    Cli(#[from] clap::Error),
+    #[error("Failed to read config file '{}'", .path.display())]
+    ConfigRead {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("Invalid toml in config file '{}'", .path.display())]
+    InvalidConfig {
+        path: PathBuf,
+        #[source]
+        source: toml::de::Error,
+    },
+    #[error("Invalid command string for language '{language}': {command}")]
+    InvalidCommand { language: String, command: String },
+    #[error("Empty command string for language '{0}'")]
+    EmptyCommand(String),
+    #[error("Failed to read theme file '{}'", .path.display())]
+    ThemeRead {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("Invalid theme file '{}'", .path.display())]
+    InvalidTheme {
+        path: PathBuf,
+        #[source]
+        source: arborium_theme::ThemeError,
+    },
+    #[error("Unknown built-in theme '{0}'")]
+    UnknownBuiltinTheme(String),
+    #[error("Invalid path {}", .0.display())]
+    InvalidPath(PathBuf),
+    #[error(
+        "Could not detect language from file name '{}'. Specify it with --lang flag.",
+        .0.display()
+    )]
+    UnknownLanguage(PathBuf),
+    #[error("Could not detect language. Specify it with --lang flag.")]
+    MissingLanguage,
+    #[error("Failed to read source file '{}'", .path.display())]
+    SourceRead {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("Failed to read stdin")]
+    StdinRead(#[source] io::Error),
+    #[error(transparent)]
+    Lsp(#[from] lsp::Error),
+    #[error(transparent)]
+    Highlight(#[from] lighter::Error),
+}
+
 /// Raw config maps directly to how the TOML is structured
 #[derive(serde::Deserialize)]
 struct RawConfig {
@@ -135,21 +194,26 @@ impl Config {
 
     /// Read a config from file, parses `RawConfig` and converts it into `Config`
     fn from_file(path: &Path) -> Result<Self> {
-        let text = fs::read_to_string(path)
-            .with_context(|| format!("Failed to read config file '{}'", path.display()))?;
-        let config: RawConfig = toml::from_str(&text)
-            .with_context(|| format!("Invalid toml in config file '{}'", path.display()))?;
+        let text = fs::read_to_string(path).map_err(|source| Error::ConfigRead {
+            path: path.to_owned(),
+            source,
+        })?;
+        let config: RawConfig = toml::from_str(&text).map_err(|source| Error::InvalidConfig {
+            path: path.to_owned(),
+            source,
+        })?;
 
         // parse commands
         let config_commands = config
             .servers
             .into_iter()
             .map(|(language, command)| {
-                let parts = shlex::split(&command).with_context(|| {
-                    format!("Invalid command string for language '{language}': {command}")
+                let parts = shlex::split(&command).ok_or_else(|| Error::InvalidCommand {
+                    language: language.clone(),
+                    command,
                 })?;
                 let Some((program, args)) = parts.split_first() else {
-                    bail!("Empty command string for language '{language}'");
+                    return Err(Error::EmptyCommand(language));
                 };
 
                 Ok((
@@ -157,7 +221,7 @@ impl Config {
                     lsp::CommandEntry::new(program, args),
                 ))
             })
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<Result<Vec<_>>>()?;
 
         let mut commands = lsp::default_commands();
         commands.extend(config_commands);
@@ -204,7 +268,7 @@ struct CliOptions {
 }
 
 impl TryFrom<CliInterface> for CliOptions {
-    type Error = anyhow::Error;
+    type Error = Error;
 
     fn try_from(cli: CliInterface) -> Result<Self> {
         let lang = CliOptions::resolve_language(cli.lang.as_deref(), cli.file.as_deref())?;
@@ -240,17 +304,21 @@ impl CliOptions {
     ) -> Result<arborium::theme::Theme> {
         /// Load custom theme from file
         fn load_custom_theme(path: &Path) -> Result<arborium::theme::Theme> {
-            let text = fs::read_to_string(path)
-                .with_context(|| format!("Failed to read theme file '{}'", path.display()))?;
-            arborium::theme::Theme::from_toml(&text)
-                .with_context(|| format!("Invalid theme file '{}'", path.display()))
+            let text = fs::read_to_string(path).map_err(|source| Error::ThemeRead {
+                path: path.to_owned(),
+                source,
+            })?;
+            arborium::theme::Theme::from_toml(&text).map_err(|source| Error::InvalidTheme {
+                path: path.to_owned(),
+                source,
+            })
         }
 
         fn load_builtin_theme(name: &str) -> Result<arborium::theme::Theme> {
             arborium::theme::builtin::all()
                 .into_iter()
                 .find(|theme| theme.name.eq_ignore_ascii_case(name))
-                .ok_or_else(|| anyhow!("Unknown built-in theme '{name}'"))
+                .ok_or_else(|| Error::UnknownBuiltinTheme(name.to_owned()))
         }
 
         match (builtin_theme, custom_path) {
@@ -273,16 +341,12 @@ impl CliOptions {
             (None, Some(file_name)) => {
                 let path = file_name
                     .to_str()
-                    .ok_or_else(|| anyhow!("Invalid path {}", file_name.display()))?;
-                arborium::detect_language(path).map(lighter::LangName::from).ok_or_else(|| {
-                anyhow!(
-                    "Could not detect language from file name '{path}'. Specify it with --lang flag."
-                )
-            })
+                    .ok_or_else(|| Error::InvalidPath(file_name.to_owned()))?;
+                arborium::detect_language(path)
+                    .map(lighter::LangName::from)
+                    .ok_or_else(|| Error::UnknownLanguage(file_name.to_owned()))
             }
-            (None, None) => {
-                bail!("Could not detect language. Specify it with --lang flag.")
-            }
+            (None, None) => Err(Error::MissingLanguage),
         }
     }
 }
@@ -290,13 +354,15 @@ impl CliOptions {
 /// Read input source code: from a file path or from stdin.
 fn read_input(path: Option<&Path>) -> Result<String> {
     match path {
-        Some(path) => fs::read_to_string(path)
-            .with_context(|| anyhow!("Failed to read source file '{}'", path.display())),
+        Some(path) => fs::read_to_string(path).map_err(|source| Error::SourceRead {
+            path: path.to_owned(),
+            source,
+        }),
         None => {
             let mut buf = String::new();
             io::stdin()
                 .read_to_string(&mut buf)
-                .context("Failed to read stdin")?;
+                .map_err(Error::StdinRead)?;
             Ok(buf)
         }
     }
@@ -336,6 +402,7 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::assert_matches;
 
     const STUB_FILE: &str = "stub.py";
 
@@ -453,6 +520,6 @@ rust = " "
 
         let error = Config::from_file(&file.path()).err().unwrap();
 
-        assert!(error.to_string().contains("Empty command string"));
+        assert_matches!(error, Error::EmptyCommand(_));
     }
 }
