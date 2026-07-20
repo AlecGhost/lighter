@@ -166,6 +166,7 @@ enum CaptureMapping {
 }
 
 /// A `RawConfig` parsed into a format the `lsp::ServerRegistry` understands
+#[derive(Debug)]
 struct Config {
     commands: lsp::Commands,
     general_mapping: lsp::CaptureMapping,
@@ -256,6 +257,7 @@ impl Config {
     }
 }
 
+#[derive(Debug)]
 struct CliOptions {
     file: Option<PathBuf>,
     lang: lighter::LangName,
@@ -353,6 +355,10 @@ impl CliOptions {
 
 /// Read input source code: from a file path or from stdin.
 fn read_input(path: Option<&Path>) -> Result<String> {
+    read_input_from(path, io::stdin())
+}
+
+fn read_input_from(path: Option<&Path>, mut stdin: impl Read) -> Result<String> {
     match path {
         Some(path) => fs::read_to_string(path).map_err(|source| Error::SourceRead {
             path: path.to_owned(),
@@ -360,9 +366,7 @@ fn read_input(path: Option<&Path>) -> Result<String> {
         }),
         None => {
             let mut buf = String::new();
-            io::stdin()
-                .read_to_string(&mut buf)
-                .map_err(Error::StdinRead)?;
+            stdin.read_to_string(&mut buf).map_err(Error::StdinRead)?;
             Ok(buf)
         }
     }
@@ -408,7 +412,10 @@ mod tests {
     const STUB_FILE: &str = "stub.py";
 
     enum CliArgs {
+        Config,
+        CustomTheme,
         Format,
+        Lang,
         Project,
         Log,
         Theme,
@@ -417,7 +424,10 @@ mod tests {
     impl CliArgs {
         fn as_str(&self) -> &'static str {
             match self {
+                CliArgs::Config => "--config",
+                CliArgs::CustomTheme => "--custom-theme",
                 CliArgs::Format => "--format",
+                CliArgs::Lang => "--lang",
                 CliArgs::Log => "--log",
                 CliArgs::Project => "--project",
                 CliArgs::Theme => "--theme",
@@ -481,14 +491,25 @@ mod tests {
 
     fn temp_file(suffix: &str, source: &str) -> tempfile::NamedTempFile {
         let file = tempfile::Builder::new().suffix(suffix).tempfile().unwrap();
-        fs::write(&file.path(), source).unwrap();
+        fs::write(file.path(), source).unwrap();
         file
     }
 
-    fn parse_options(args: &[&str]) -> Result<CliOptions> {
-        let cli =
-            CliInterface::try_parse_from(std::iter::once(BIN_NAME).chain(args.iter().copied()))?;
+    fn missing_path(name: &str) -> PathBuf {
+        let dir = tempfile::tempdir().unwrap();
+        dir.path().join(name)
+    }
+
+    fn parse_options<T: AsRef<std::ffi::OsStr>>(args: &[T]) -> Result<CliOptions> {
+        let cli = CliInterface::try_parse_from(
+            std::iter::once(std::ffi::OsStr::new(BIN_NAME))
+                .chain(args.iter().map(|arg| arg.as_ref())),
+        )?;
         CliOptions::try_from(cli)
+    }
+
+    fn path_value(path: &Path) -> &str {
+        path.to_str().unwrap()
     }
 
     fn parse_cli_value(argument: CliArgs, value: &str) -> Result<CliOptions> {
@@ -561,11 +582,11 @@ mod tests {
             cmd.command, cmd.args[0], cmd.args[1], rust_mapping.0, rust_mapping.1
         );
         let file = temp_file("config.toml", &contents);
-        let config = Config::from_file(&file.path()).unwrap();
-        let parsed_command = config.commands.get(server).unwrap();
+        let options = parse_cli_value(CliArgs::Config, path_value(file.path())).unwrap();
+        let parsed_command = options.config.commands.get(server).unwrap();
 
         assert_eq!(&cmd, parsed_command);
-        assert_eq!(mapping, config.lang_mapping);
+        assert_eq!(mapping, options.config.lang_mapping);
     }
 
     #[test]
@@ -578,8 +599,123 @@ rust = " "
 "#,
         );
 
-        let error = Config::from_file(&file.path()).err().unwrap();
+        let error = parse_cli_value(CliArgs::Config, path_value(file.path())).unwrap_err();
 
         assert_matches!(error, Error::EmptyCommand(_));
+    }
+
+    #[test]
+    fn reject_unreadable_config() {
+        let path = missing_path("config.toml");
+
+        let error = parse_cli_value(CliArgs::Config, path_value(&path)).unwrap_err();
+
+        assert_matches!(error, Error::ConfigRead { path: error_path, .. } if error_path == path);
+    }
+
+    #[test]
+    fn reject_invalid_config() {
+        let file = temp_file(".toml", "=");
+
+        let error = parse_cli_value(CliArgs::Config, path_value(file.path())).unwrap_err();
+
+        assert_matches!(error, Error::InvalidConfig { path, .. } if path == file.path());
+    }
+
+    #[test]
+    fn reject_invalid_server_command() {
+        let file = temp_file(
+            ".toml",
+            r#"
+[servers]
+rust = "'"
+"#,
+        );
+
+        let error = parse_cli_value(CliArgs::Config, path_value(file.path())).unwrap_err();
+
+        assert_matches!(
+            error,
+            Error::InvalidCommand { language, command }
+                if language == "rust" && command == "'"
+        );
+    }
+
+    #[test]
+    fn reject_unreadable_custom_theme() {
+        let path = missing_path("theme.toml");
+
+        let error = parse_cli_value(CliArgs::CustomTheme, path_value(&path)).unwrap_err();
+
+        assert_matches!(error, Error::ThemeRead { path: error_path, .. } if error_path == path);
+    }
+
+    #[test]
+    fn reject_invalid_custom_theme() {
+        let file = temp_file(".toml", "=");
+
+        let error = parse_cli_value(CliArgs::CustomTheme, path_value(file.path())).unwrap_err();
+
+        assert_matches!(error, Error::InvalidTheme { path, .. } if path == file.path());
+    }
+
+    #[test]
+    fn reject_unknown_builtin_theme() {
+        let theme_name = "unknown-theme";
+        let error = CliOptions::load_theme(Some(theme_name), None).unwrap_err();
+
+        assert_matches!(error, Error::UnknownBuiltinTheme(name) if name == theme_name);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reject_non_utf8_file_path() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let path = PathBuf::from(std::ffi::OsString::from_vec(vec![0xff]));
+
+        let error = parse_options(&[path.as_os_str()]).unwrap_err();
+
+        assert_matches!(error, Error::InvalidPath(error_path) if error_path == path);
+    }
+
+    #[test]
+    fn reject_file_with_unknown_language() {
+        let path = "unknown-language";
+
+        let error = parse_options(&[path]).unwrap_err();
+
+        assert_matches!(error, Error::UnknownLanguage(error_path) if error_path == Path::new(path));
+    }
+
+    #[test]
+    fn reject_missing_language() {
+        let error = parse_options::<&str>(&[]).unwrap_err();
+
+        assert_matches!(error, Error::MissingLanguage);
+    }
+
+    #[test]
+    fn reject_unreadable_source_file() {
+        let path = missing_path("source.rs");
+
+        let error = read_input(Some(&path)).unwrap_err();
+
+        assert_matches!(error, Error::SourceRead { path: error_path, .. } if error_path == path);
+    }
+
+    struct FailingReader;
+
+    impl Read for FailingReader {
+        fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+            Err(io::ErrorKind::Other.into())
+        }
+    }
+
+    #[test]
+    fn reject_unreadable_stdin() {
+        let error = read_input_from(None, FailingReader).unwrap_err();
+
+        assert_matches!(error, Error::StdinRead(_));
     }
 }
