@@ -130,7 +130,7 @@ pub fn default_commands() -> Commands {
         .collect()
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ServerRegistry {
     clients: HashMap<LangName, Client>,
     commands: Commands,
@@ -138,6 +138,19 @@ pub struct ServerRegistry {
     lang_mapping: LangCaptureMapping,
     project: Option<Project>,
     log: LogLevel,
+}
+
+impl Default for ServerRegistry {
+    fn default() -> Self {
+        Self {
+            commands: default_commands(),
+            clients: HashMap::new(),
+            general_mapping: HashMap::new(),
+            lang_mapping: HashMap::new(),
+            project: None,
+            log: LogLevel::default(),
+        }
+    }
 }
 
 impl ServerRegistry {

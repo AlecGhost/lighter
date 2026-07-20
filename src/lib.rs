@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::io::Write;
 use std::path::Path;
 use std::rc::Rc;
@@ -14,6 +15,13 @@ const LSP_SPANS_HEADING: &str = "LSP spans:";
 
 pub type LangName = Rc<str>;
 
+#[derive(Debug, PartialEq, Eq)]
+pub struct Input<'a> {
+    pub source: &'a str,
+    pub path: Option<&'a Path>,
+    pub lang: LangName,
+}
+
 #[derive(Debug, Default, Clone, Copy, Eq, PartialEq, clap::ValueEnum)]
 pub enum Output {
     #[default]
@@ -21,11 +29,21 @@ pub enum Output {
     Html,
 }
 
+#[derive(Debug)]
 pub struct HighlightOptions {
     pub output: Output,
     pub tree_sitter: bool,
     pub theme: Theme,
-    pub log: logging::LogLevel,
+}
+
+impl Default for HighlightOptions {
+    fn default() -> Self {
+        Self {
+            output: Output::Ansi,
+            theme: arborium_theme::builtin::catppuccin_mocha(),
+            tree_sitter: true,
+        }
+    }
 }
 
 #[derive(Error, Debug)]
@@ -40,43 +58,68 @@ pub enum Error {
 
 type Result<T> = std::result::Result<T, Error>;
 
-/// Highlight source with tree-sitter syntax and LSP semantic information.
-pub fn highlight(
-    input: &str,
-    path: Option<&Path>,
-    lang: LangName,
-    registry: &mut lsp::ServerRegistry,
-    options: &HighlightOptions,
-) -> Result<String> {
-    let tree_sitter_spans = if options.tree_sitter {
-        // TODO: get injections and add lsp highlighting for injected languages
-        arborium::Highlighter::new().highlight_spans(&lang, input)?
-    } else {
-        Vec::new()
-    };
+#[derive(Debug, Default)]
+pub struct Highlighter {
+    registry: RefCell<lsp::ServerRegistry>,
+    options: HighlightOptions,
+    log: logging::LogLevel,
+}
 
-    let pattern_index = next_pattern_index(&tree_sitter_spans);
-    let lsp_spans =
-        registry
-            .get_server(lang.clone())?
-            .get_semantic_spans(input, path, pattern_index)?;
+impl Highlighter {
+    pub fn new(registry: RefCell<lsp::ServerRegistry>) -> Self {
+        Self::with_options(
+            registry,
+            HighlightOptions::default(),
+            logging::LogLevel::default(),
+        )
+    }
 
-    write_debug_spans(
-        &mut std::io::stderr().lock(),
-        input,
-        &tree_sitter_spans,
-        &lsp_spans,
-        options.log,
-    )
-    .map_err(Error::DebugOutput)?;
+    pub fn with_options(
+        registry: RefCell<lsp::ServerRegistry>,
+        options: HighlightOptions,
+        log: logging::LogLevel,
+    ) -> Self {
+        Self {
+            registry,
+            options,
+            log,
+        }
+    }
 
-    Ok(render(
-        input,
-        tree_sitter_spans,
-        lsp_spans,
-        options.output,
-        &options.theme,
-    ))
+    /// Highlight source with tree-sitter syntax and LSP semantic information.
+    pub fn highlight(&self, input: Input<'_>) -> Result<String> {
+        let tree_sitter_spans = if self.options.tree_sitter {
+            // TODO: get injections and add lsp highlighting for injected languages
+            arborium::Highlighter::new().highlight_spans(&input.lang, input.source)?
+        } else {
+            Vec::new()
+        };
+
+        let pattern_index = next_pattern_index(&tree_sitter_spans);
+        let lsp_spans = self
+            .registry
+            .try_borrow_mut()
+            .expect("Server registry already borrowed")
+            .get_server(input.lang.clone())?
+            .get_semantic_spans(input.source, input.path, pattern_index)?;
+
+        write_debug_spans(
+            &mut std::io::stderr().lock(),
+            input.source,
+            &tree_sitter_spans,
+            &lsp_spans,
+            self.log,
+        )
+        .map_err(Error::DebugOutput)?;
+
+        Ok(render(
+            input.source,
+            tree_sitter_spans,
+            lsp_spans,
+            self.options.output,
+            &self.options.theme,
+        ))
+    }
 }
 
 fn next_pattern_index(spans: &[Span]) -> u32 {
@@ -153,7 +196,6 @@ fn format_span_lines(source: &str, spans: &[Span]) -> String {
         .join("\n")
 }
 
-
 #[cfg(test)]
 mod tests {
     use arborium_theme::ThemeSlot;
@@ -170,8 +212,6 @@ variant = "light"
 [palette]
 mauve = "#010203"
 "##;
-
-
 
     #[test]
     fn applies_parsed_theme_colors() {

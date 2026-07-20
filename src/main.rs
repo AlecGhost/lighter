@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Read};
@@ -379,25 +380,28 @@ fn main() -> Result<()> {
     let options = CliOptions::try_from(cli)?;
     let source = read_input(options.file.as_deref())?;
 
-    let mut registry = lsp::ServerRegistry::new(
+    let registry = RefCell::new(lsp::ServerRegistry::new(
         options.config.commands,
         options.config.general_mapping,
         options.config.lang_mapping,
         options.project.as_deref(),
         options.log,
-    )?;
-    let output = lighter::highlight(
-        &source,
-        options.file.as_deref(),
-        options.lang,
-        &mut registry,
-        &lighter::HighlightOptions {
+    )?);
+    let input = lighter::Input {
+        source: &source,
+        path: options.file.as_deref(),
+        lang: options.lang,
+    };
+    let highlighter = lighter::Highlighter::with_options(
+        registry,
+        lighter::HighlightOptions {
             output: options.format,
             tree_sitter: !options.no_tree_sitter,
             theme: options.theme,
-            log: options.log,
         },
-    )?;
+        options.log,
+    );
+    let output = highlighter.highlight(input)?;
 
     print!("{output}");
 
