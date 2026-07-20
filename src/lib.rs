@@ -12,6 +12,7 @@ use thiserror::Error;
 mod latex;
 pub mod logging;
 pub mod lsp;
+pub mod server;
 
 const TREE_SITTER_SPANS_HEADING: &str = "Tree-sitter spans:";
 const LSP_SPANS_HEADING: &str = "LSP spans:";
