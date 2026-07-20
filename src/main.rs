@@ -14,8 +14,6 @@ const BIN_NAME: &str = "lighter";
 const STDIO_FRAME_TERMINATOR: u8 = b'\0';
 const STDIO_LANGUAGE_SEPARATOR: char = '\n';
 const STDIO_DIAGNOSTIC_PREFIX: &str = "lighter stdio:";
-const FANCYVERB_GROUP_CHARACTERS: [char; 2] = ['{', '}'];
-const LATEX_DELIMITER_GROUP_ERROR: &str = "cannot be a FancyVerb group character (`{` or `}`)";
 
 type Result<T> = std::result::Result<T, Error>;
 
@@ -64,13 +62,6 @@ struct CliInterface {
     #[arg(short, long, value_enum, default_value_t = lighter::Output::Ansi)]
     format: lighter::Output,
 
-    /// FancyVerb command character used by LaTeX output.
-    /// Output targets xcolor-enabled FancyVerb, not ordinary LaTeX text; code
-    /// metacharacters remain verbatim. For example, use § with
-    /// `commandchars=§\{\}`.
-    #[arg(long, value_name = "CHAR", value_parser = latex_delimiter_parser)]
-    latex_delimiter: Option<char>,
-
     /// Inclusive, one-based line range to output (start:end, :end, or start:).
     #[arg(long, value_name = "RANGE")]
     lines: Option<lighter::LineRange>,
@@ -99,15 +90,6 @@ fn builtin_theme_parser() -> clap::builder::PossibleValuesParser {
             .into_iter()
             .map(|theme| theme.name),
     )
-}
-
-fn latex_delimiter_parser(value: &str) -> std::result::Result<char, String> {
-    match value.parse::<char>() {
-        Ok(delimiter) if FANCYVERB_GROUP_CHARACTERS.contains(&delimiter) => {
-            Err(LATEX_DELIMITER_GROUP_ERROR.to_owned())
-        }
-        result => result.map_err(|_| "expected exactly one character".to_owned()),
-    }
 }
 
 #[derive(Error, Debug)]
@@ -156,8 +138,6 @@ enum Error {
     UnknownLanguage(PathBuf),
     #[error("Could not detect language. Specify it with --lang flag.")]
     MissingLanguage,
-    #[error("--latex-delimiter requires --format latex")]
-    LatexDelimiterWithoutLatex,
     #[error("Failed to read source file '{}'", .path.display())]
     SourceRead {
         path: PathBuf,
@@ -344,7 +324,6 @@ struct CliOptions {
     project: Option<PathBuf>,
     log: logging::LogLevel,
     format: lighter::Output,
-    latex_delimiter: Option<char>,
     lines: Option<lighter::LineRange>,
     no_tree_sitter: bool,
 }
@@ -371,16 +350,11 @@ impl TryFrom<CliInterface> for CliOptions {
             stdio,
             project,
             format,
-            latex_delimiter,
             lines,
             no_tree_sitter,
             log,
             ..
         } = cli;
-        if latex_delimiter.is_some() && format != lighter::Output::Latex {
-            return Err(Error::LatexDelimiterWithoutLatex);
-        }
-
         Ok(Self {
             file,
             lang,
@@ -390,7 +364,6 @@ impl TryFrom<CliInterface> for CliOptions {
             project,
             log,
             format,
-            latex_delimiter,
             lines,
             no_tree_sitter,
         })
@@ -600,7 +573,6 @@ fn main() -> Result<()> {
             tree_sitter: !options.no_tree_sitter,
             theme: options.theme,
             lines: options.lines,
-            latex_delimiter: options.latex_delimiter,
         },
         options.log,
     );
@@ -659,7 +631,6 @@ accent = "#010203"
         CustomTheme,
         Format,
         Lang,
-        LatexDelimiter,
         Lines,
         NoLsp,
         Project,
@@ -675,7 +646,6 @@ accent = "#010203"
                 CliArgs::CustomTheme => "--custom-theme",
                 CliArgs::Format => "--format",
                 CliArgs::Lang => "--lang",
-                CliArgs::LatexDelimiter => "--latex-delimiter",
                 CliArgs::Lines => "--lines",
                 CliArgs::Log => "--log",
                 CliArgs::NoLsp => "--no-lsp",
@@ -859,54 +829,6 @@ accent = "#010203"
         let options = parse_cli_value(CliArgs::Lines, range).unwrap();
 
         assert_eq!(options.lines, Some(range.parse().unwrap()));
-    }
-
-    #[test]
-    fn accept_latex_delimiter_for_latex_output() {
-        const DELIMITER: &str = "§";
-        let options = parse_options(&[
-            STUB_FILE,
-            CliArgs::Format.as_str(),
-            "latex",
-            CliArgs::LatexDelimiter.as_str(),
-            DELIMITER,
-        ])
-        .unwrap();
-
-        assert_eq!(options.format, lighter::Output::Latex);
-        assert_eq!(options.latex_delimiter, DELIMITER.chars().next());
-    }
-
-    #[test]
-    fn reject_latex_delimiter_for_other_output_formats() {
-        let error = parse_cli_value(CliArgs::LatexDelimiter, "|").unwrap_err();
-
-        assert_matches!(error, Error::LatexDelimiterWithoutLatex);
-    }
-
-    #[test]
-    fn reject_fancyverb_group_characters_as_latex_delimiters() {
-        FANCYVERB_GROUP_CHARACTERS
-            .into_iter()
-            .for_each(|delimiter| {
-                let delimiter = delimiter.to_string();
-                let error = parse_options(&[
-                    STUB_FILE,
-                    CliArgs::Format.as_str(),
-                    "latex",
-                    CliArgs::LatexDelimiter.as_str(),
-                    delimiter.as_str(),
-                ])
-                .unwrap_err();
-
-                match error {
-                    Error::Cli(error) => {
-                        assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
-                        assert!(error.to_string().contains(LATEX_DELIMITER_GROUP_ERROR));
-                    }
-                    error => panic!("unexpected error for {delimiter:?}: {error}"),
-                }
-            });
     }
 
     #[test]
