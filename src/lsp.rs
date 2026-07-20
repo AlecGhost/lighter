@@ -68,7 +68,8 @@ pub enum Error {
     NoSemanticTokens(String),
 }
 
-pub type CaptureMappings = HashMap<LangName, HashMap<String, String>>;
+pub type CaptureMapping = HashMap<String, String>;
+pub type LangCaptureMapping = HashMap<LangName, CaptureMapping>;
 pub type Commands = HashMap<LangName, CommandEntry>;
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -132,7 +133,8 @@ pub fn default_commands() -> HashMap<LangName, CommandEntry> {
 pub struct ServerRegistry {
     clients: HashMap<LangName, Client>,
     commands: Commands,
-    mappings: CaptureMappings,
+    general_mapping: CaptureMapping,
+    lang_mapping: LangCaptureMapping,
     project: Option<Project>,
     log: LogLevel,
 }
@@ -140,13 +142,15 @@ pub struct ServerRegistry {
 impl ServerRegistry {
     pub fn new(
         commands: HashMap<LangName, CommandEntry>,
-        mappings: HashMap<LangName, HashMap<String, String>>,
+        general_mapping: CaptureMapping,
+        lang_mapping: LangCaptureMapping,
         project: Option<&Path>,
         log: LogLevel,
     ) -> Result<Self> {
         Ok(Self {
             commands,
-            mappings,
+            general_mapping,
+            lang_mapping,
             project: project.map(Project::new).transpose()?,
             log,
             clients: HashMap::new(),
@@ -169,7 +173,13 @@ impl ServerRegistry {
                 )?)
             }
         };
-        let mapping = self.mappings.entry(lang).or_insert_with(|| HashMap::new());
+        let mapping = self.lang_mapping.entry(lang).or_default();
+
+        mapping.extend(
+            self.general_mapping
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone())),
+        );
         Ok(Server { client, mapping })
     }
 }

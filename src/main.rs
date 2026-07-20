@@ -109,14 +109,16 @@ enum CaptureMapping {
 /// A `RawConfig` parsed into a format the `lsp::ServerRegistry` understands
 struct Config {
     commands: lsp::Commands,
-    mappings: lsp::CaptureMappings,
+    general_mapping: lsp::CaptureMapping,
+    lang_mapping: lsp::LangCaptureMapping,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
             commands: lsp::default_commands(),
-            mappings: lsp::CaptureMappings::new(),
+            general_mapping: lsp::CaptureMapping::new(),
+            lang_mapping: lsp::LangCaptureMapping::new(),
         }
     }
 }
@@ -126,7 +128,8 @@ impl Config {
     fn no_lsp() -> Self {
         Self {
             commands: lsp::Commands::new(),
-            mappings: lsp::CaptureMappings::new(),
+            general_mapping: lsp::CaptureMapping::new(),
+            lang_mapping: lsp::LangCaptureMapping::new(),
         }
     }
 
@@ -159,26 +162,23 @@ impl Config {
         let mut commands = lsp::default_commands();
         commands.extend(config_commands);
 
-        // TODO: add general mapping for all supported languages
-
-        // add all general mappings to the lang-specific mappings
-        let mut general_mappings = Vec::with_capacity(config.captures.len());
-        let mut lang_mappings = HashMap::with_capacity(config.captures.len());
+        let mut general_mapping = HashMap::with_capacity(config.captures.len());
+        let mut lang_mapping = HashMap::with_capacity(config.captures.len());
         for (key, val) in config.captures.into_iter() {
             match val {
-                CaptureMapping::Capture(mapping) => general_mappings.push((key, mapping)),
+                CaptureMapping::Capture(mapping) => {
+                    general_mapping.insert(key, mapping);
+                }
                 CaptureMapping::Language(map) => {
-                    lang_mappings.insert(lighter::LangName::from(key), map);
+                    lang_mapping.insert(lighter::LangName::from(key), map);
                 }
             }
         }
-        lang_mappings.values_mut().for_each(|map| {
-            map.extend(general_mappings.clone());
-        });
 
         Ok(Config {
             commands,
-            mappings: lang_mappings,
+            general_mapping,
+            lang_mapping,
         })
     }
 
@@ -310,7 +310,8 @@ fn main() -> Result<()> {
 
     let mut registry = lsp::ServerRegistry::new(
         options.config.commands,
-        options.config.mappings,
+        options.config.general_mapping,
+        options.config.lang_mapping,
         options.project.as_deref(),
         options.log,
     )?;
@@ -419,9 +420,9 @@ mod tests {
             args: vec!["--stdio".to_string(), "random arg".to_string()],
         };
         let server = "python";
-        let rust_mappings = ("const".to_string(), "constant".to_string());
+        let rust_mapping = ("const".to_string(), "constant".to_string());
         let rust = lighter::LangName::from("rust");
-        let mappings = HashMap::from([(rust.clone(), HashMap::from([rust_mappings.clone()]))]);
+        let mapping = HashMap::from([(rust.clone(), HashMap::from([rust_mapping.clone()]))]);
         let contents = format!(
             r#"
 [servers]
@@ -430,14 +431,14 @@ mod tests {
 [captures.{rust}]
 {} = "{}"
         "#,
-            cmd.command, cmd.args[0], cmd.args[1], rust_mappings.0, rust_mappings.1
+            cmd.command, cmd.args[0], cmd.args[1], rust_mapping.0, rust_mapping.1
         );
         let file = temp_file("config.toml", &contents);
         let config = Config::from_file(&file.path()).unwrap();
         let parsed_command = config.commands.get(server).unwrap();
 
         assert_eq!(&cmd, parsed_command);
-        assert_eq!(mappings, config.mappings);
+        assert_eq!(mapping, config.lang_mapping);
     }
 
     #[test]
