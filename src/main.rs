@@ -599,6 +599,66 @@ mod tests {
     }
 
     #[test]
+    fn read_config_with_general_capture_mapping_from_disk() {
+        let mapping = ("decorator".to_string(), "constant".to_string());
+        let contents = format!(
+            r#"
+[captures]
+{} = "{}"
+"#,
+            mapping.0, mapping.1
+        );
+        let file = temp_file("config.toml", &contents);
+
+        let config = Config::from_file(file.path()).unwrap();
+
+        assert_eq!(HashMap::from([mapping]), config.general_mapping);
+        assert!(config.lang_mapping.is_empty());
+    }
+
+    #[test]
+    fn accept_custom_theme_from_disk() {
+        let expected = arborium_theme::builtin::catppuccin_mocha();
+        let variant = match expected.is_dark {
+            true => "dark",
+            false => "light",
+        };
+        let source_url = expected.source_url.as_deref().unwrap();
+        let background = expected.background.unwrap().to_hex();
+        let foreground = expected.foreground.unwrap().to_hex();
+        let keyword_index =
+            arborium_theme::slot_to_highlight_index(arborium_theme::ThemeSlot::Keyword).unwrap();
+        let keyword = expected.style(keyword_index).unwrap();
+        let keyword_foreground = keyword.fg.unwrap().to_hex();
+
+        let contents = format!(
+            r##"
+name = "{}"
+variant = "{variant}"
+source = "{source_url}"
+background = "{background}"
+foreground = "{foreground}"
+
+"keyword" = {{ fg = "{keyword_foreground}" }}
+"##,
+            expected.name
+        );
+        let file = temp_file(".toml", &contents);
+
+        let options = parse_cli_value(CliArgs::CustomTheme, path_value(file.path())).unwrap();
+        let parsed_keyword = options.theme.style(keyword_index).unwrap();
+
+        assert_eq!(expected.name, options.theme.name);
+        assert_eq!(expected.is_dark, options.theme.is_dark);
+        assert_eq!(expected.source_url, options.theme.source_url);
+        assert_eq!(expected.background, options.theme.background);
+        assert_eq!(expected.foreground, options.theme.foreground);
+        assert_eq!(keyword.fg, parsed_keyword.fg);
+        assert_eq!(keyword.bg, parsed_keyword.bg);
+        assert_eq!(keyword.modifiers, parsed_keyword.modifiers);
+    }
+
+    #[test]
     fn reject_empty_server_command() {
         let file = temp_file(
             ".toml",
