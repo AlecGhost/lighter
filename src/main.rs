@@ -402,11 +402,13 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use quickcheck::{Arbitrary, Gen, TestResult};
     use std::assert_matches;
 
     const STUB_FILE: &str = "stub.py";
 
     enum CliArgs {
+        Format,
         Project,
         Log,
         Theme,
@@ -415,11 +417,66 @@ mod tests {
     impl CliArgs {
         fn as_str(&self) -> &'static str {
             match self {
+                CliArgs::Format => "--format",
                 CliArgs::Log => "--log",
                 CliArgs::Project => "--project",
                 CliArgs::Theme => "--theme",
             }
         }
+    }
+
+    trait TestValues: Clone + 'static {
+        fn values() -> Vec<Self>;
+    }
+
+    #[derive(Clone, Debug)]
+    struct TestValue<T>(T);
+
+    impl<T> std::ops::Deref for TestValue<T> {
+        type Target = T;
+
+        fn deref(&self) -> &Self::Target {
+            &self.0
+        }
+    }
+
+    impl<T: TestValues> Arbitrary for TestValue<T> {
+        fn arbitrary(generator: &mut Gen) -> Self {
+            let values = T::values();
+            Self(generator.choose(&values).unwrap().clone())
+        }
+    }
+
+    impl TestValues for arborium::theme::Theme {
+        fn values() -> Vec<Self> {
+            builtin_themes()
+        }
+    }
+
+    impl TestValues for logging::LogLevel {
+        fn values() -> Vec<Self> {
+            <Self as clap::ValueEnum>::value_variants().to_vec()
+        }
+    }
+
+    impl TestValues for lighter::Output {
+        fn values() -> Vec<Self> {
+            <Self as clap::ValueEnum>::value_variants().to_vec()
+        }
+    }
+
+    type BuiltinTheme = TestValue<arborium::theme::Theme>;
+    type ArbitraryLogLevel = TestValue<logging::LogLevel>;
+    type ArbitraryOutput = TestValue<lighter::Output>;
+
+    fn builtin_themes() -> Vec<arborium::theme::Theme> {
+        arborium::theme::builtin::all()
+    }
+
+    fn is_builtin_theme(name: &str) -> bool {
+        builtin_themes()
+            .iter()
+            .any(|theme| theme.name.eq_ignore_ascii_case(name))
     }
 
     fn temp_file(suffix: &str, source: &str) -> tempfile::NamedTempFile {
@@ -434,33 +491,45 @@ mod tests {
         CliOptions::try_from(cli)
     }
 
-    fn builtin_theme() -> arborium::theme::Theme {
-        arborium_theme::builtin::dracula()
+    fn parse_cli_value(argument: CliArgs, value: &str) -> Result<CliOptions> {
+        parse_options(&[STUB_FILE, argument.as_str(), value])
     }
 
     fn parse_builtin_theme(name: &str) -> Result<String> {
-        parse_options(&[STUB_FILE, CliArgs::Theme.as_str(), &name])
-            .map(|options| options.theme.name)
+        parse_cli_value(CliArgs::Theme, name).map(|options| options.theme.name)
     }
 
-    #[test]
-    fn accept_builtin_theme() {
-        let theme = builtin_theme();
-        let name = parse_builtin_theme(&theme.name).unwrap();
-        assert_eq!(theme.name, name);
-    }
+    quickcheck::quickcheck! {
+        fn accept_builtin_theme(theme: BuiltinTheme) -> bool {
+            parse_builtin_theme(&theme.name).is_ok_and(|name| theme.name == name)
+        }
 
-    #[test]
-    fn accept_builtin_theme_case_insensitively() {
-        let theme = builtin_theme();
-        let name = parse_builtin_theme(&theme.name.to_lowercase()).unwrap();
-        assert_eq!(theme.name, name);
-    }
+        fn accept_builtin_theme_case_insensitively(theme: BuiltinTheme) -> bool {
+            parse_builtin_theme(&theme.name.to_lowercase())
+                .is_ok_and(|name| theme.name == name)
+        }
 
-    #[test]
-    fn reject_unknown_theme() {
-        let _theme = builtin_theme();
-        let _error = parse_builtin_theme("unknown").unwrap_err();
+        fn reject_unknown_theme(name: String) -> TestResult {
+            match name.starts_with('-') || is_builtin_theme(&name) {
+                true => TestResult::discard(),
+                false => TestResult::from_bool(matches!(
+                    parse_builtin_theme(&name),
+                    Err(Error::Cli(error))
+                        if error.kind() == clap::error::ErrorKind::InvalidValue
+                )),
+            }
+        }
+
+        fn accept_log_level_case_insensitively(log_level: ArbitraryLogLevel) -> bool {
+            parse_cli_value(CliArgs::Log, &log_level.as_str().to_lowercase())
+                .is_ok_and(|options| options.log == *log_level)
+        }
+
+        fn accept_output_format(format: ArbitraryOutput) -> bool {
+            let value = clap::ValueEnum::to_possible_value(&*format).unwrap();
+            parse_cli_value(CliArgs::Format, value.get_name())
+                .is_ok_and(|options| options.format == *format)
+        }
     }
 
     #[test]
@@ -469,15 +538,6 @@ mod tests {
         let options = parse_options(&[STUB_FILE, CliArgs::Project.as_str(), dir]).unwrap();
 
         assert_eq!(options.project, Some(PathBuf::from(dir)));
-    }
-
-    #[test]
-    fn accept_log_level_case_insensitively() {
-        let log_level = logging::LogLevel::Debug;
-        let log = log_level.as_str().to_lowercase();
-        let options = parse_options(&[STUB_FILE, CliArgs::Log.as_str(), &log]).unwrap();
-
-        assert_eq!(log_level, options.log);
     }
 
     #[test]

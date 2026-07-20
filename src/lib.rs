@@ -14,7 +14,7 @@ const LSP_SPANS_HEADING: &str = "LSP spans:";
 
 pub type LangName = Rc<str>;
 
-#[derive(Debug, Default, Clone, Copy, clap::ValueEnum)]
+#[derive(Debug, Default, Clone, Copy, Eq, PartialEq, clap::ValueEnum)]
 pub enum Output {
     #[default]
     Ansi,
