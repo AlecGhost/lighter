@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use lighter::logging;
 use lighter::lsp;
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use thiserror::Error;
 
 const BIN_NAME: &str = "lighter";
@@ -15,17 +15,13 @@ const BIN_NAME: &str = "lighter";
 type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Parser, Debug)]
-#[command(name = BIN_NAME, version, about)]
+#[command(name = BIN_NAME, version, about, args_conflicts_with_subcommands = true)]
 struct CliInterface {
+    #[command(subcommand)]
+    command: Option<CliCommand>,
+
     /// Source file to highlight (reads stdin when omitted).
     file: Option<PathBuf>,
-
-    /// Run as a long-lived stdio server.
-    /// Requests are `LANG\nSOURCE\0`; responses are `HIGHLIGHTED\0`. An empty
-    /// request frame shuts down. Failed requests return an empty response and
-    /// report the error on stderr. Cannot be combined with FILE or --lang.
-    #[arg(long, conflicts_with_all = ["file", "lang"])]
-    stdio: bool,
 
     /// Project directory exposed to the language server as its workspace.
     #[arg(short, long, value_name = "DIR")]
@@ -79,6 +75,15 @@ struct CliInterface {
         default_value_t = logging::LogLevel::Error
     )]
     log: logging::LogLevel,
+}
+
+#[derive(Debug, Subcommand)]
+enum CliCommand {
+    /// Manage the background highlighting daemon.
+    Daemon {
+        #[command(subcommand)]
+        action: lighter::server::DaemonAction,
+    },
 }
 
 fn builtin_theme_parser() -> clap::builder::PossibleValuesParser {
@@ -143,8 +148,8 @@ enum Error {
     },
     #[error("Failed to read stdin")]
     StdinRead(#[source] io::Error),
-    #[error("Stdio server I/O failed")]
-    StdioIo(#[source] io::Error),
+    #[error(transparent)]
+    Daemon(#[from] lighter::server::Error),
     #[error(transparent)]
     Lsp(#[from] lsp::Error),
     #[error(transparent)]
@@ -314,8 +319,7 @@ impl Config {
 #[derive(Debug)]
 struct CliOptions {
     file: Option<PathBuf>,
-    lang: Option<lighter::LangName>,
-    stdio: bool,
+    lang: lighter::LangName,
     theme: arborium::theme::Theme,
     config: Config,
     project: Option<PathBuf>,
@@ -329,13 +333,7 @@ impl TryFrom<CliInterface> for CliOptions {
     type Error = Error;
 
     fn try_from(cli: CliInterface) -> Result<Self> {
-        let lang = match cli.stdio {
-            true => None,
-            false => Some(CliOptions::resolve_language(
-                cli.lang.as_deref(),
-                cli.file.as_deref(),
-            )?),
-        };
+        let lang = CliOptions::resolve_language(cli.lang.as_deref(), cli.file.as_deref())?;
         let config = Config::load(cli.no_lsp, cli.config.as_deref())?;
         let theme = CliOptions::load_theme(
             cli.theme.as_deref(),
@@ -344,7 +342,6 @@ impl TryFrom<CliInterface> for CliOptions {
         )?;
         let CliInterface {
             file,
-            stdio,
             project,
             format,
             lines,
@@ -355,7 +352,6 @@ impl TryFrom<CliInterface> for CliOptions {
         Ok(Self {
             file,
             lang,
-            stdio,
             theme,
             config,
             project,
@@ -444,56 +440,53 @@ fn read_input_from(path: Option<&Path>, mut stdin: impl Read) -> Result<String> 
     }
 }
 
-fn main() -> Result<()> {
-    let cli = CliInterface::parse();
-
-    let options = CliOptions::try_from(cli)?;
+fn highlighter(options: &CliOptions) -> Result<lighter::Highlighter> {
     let registry = RefCell::new(lsp::ServerRegistry::new(
-        options.config.commands,
-        options.config.general_mapping,
-        options.config.lang_mapping,
+        options.config.commands.clone(),
+        options.config.general_mapping.clone(),
+        options.config.lang_mapping.clone(),
         options.project.as_deref(),
         options.log,
     )?);
-    let highlighter = lighter::Highlighter::with_options(
+    Ok(lighter::Highlighter::with_options(
         registry,
         lighter::HighlightOptions {
             output: options.format,
             tree_sitter: !options.no_tree_sitter,
-            theme: options.theme,
+            theme: options.theme.clone(),
             lines: options.lines,
         },
         options.log,
-    );
+    ))
+}
 
-    match options.stdio {
-        true => lighter::server::serve_stdio(
-            io::stdin().lock(),
-            io::stdout().lock(),
-            io::stderr().lock(),
-            |language, source| {
-                highlighter.highlight(lighter::Input {
-                    source,
-                    path: None,
-                    lang: lighter::LangName::from(language),
-                })
-            },
-        )
-        .map_err(Error::StdioIo),
-        false => {
-            let source = read_input(options.file.as_deref())?;
-            let input = lighter::Input {
-                source: &source,
-                path: options.file.as_deref(),
-                lang: options
-                    .lang
-                    .expect("non-stdio mode always resolves a language"),
-            };
-            let output = highlighter.highlight(input)?;
-            print!("{output}");
-            Ok(())
+fn run_once(options: &CliOptions, paths: &lighter::server::DaemonPaths) -> Result<()> {
+    let source = read_input(options.file.as_deref())?;
+    let language = options.lang.as_ref();
+    let output = match lighter::server::highlight(paths, language, &source)? {
+        Some(output) => output,
+        None => highlighter(options)?.highlight(lighter::Input {
+            source: &source,
+            path: options.file.as_deref(),
+            lang: options.lang.clone(),
+        })?,
+    };
+    print!("{output}");
+    Ok(())
+}
+
+fn main() -> Result<()> {
+    let cli = CliInterface::parse();
+    let paths = lighter::server::DaemonPaths::discover();
+    match cli.command.as_ref() {
+        Some(CliCommand::Daemon { action }) => {
+            return lighter::server::run(*action).map_err(Error::from);
         }
+        None => {}
     }
+
+    let options = CliOptions::try_from(cli)?;
+    run_once(&options, &paths)
 }
 
 #[cfg(test)]
@@ -524,7 +517,6 @@ accent = "#010203"
         NoLsp,
         Project,
         Log,
-        Stdio,
         Theme,
     }
 
@@ -539,7 +531,6 @@ accent = "#010203"
                 CliArgs::Log => "--log",
                 CliArgs::NoLsp => "--no-lsp",
                 CliArgs::Project => "--project",
-                CliArgs::Stdio => "--stdio",
                 CliArgs::Theme => "--theme",
             }
         }
@@ -610,12 +601,16 @@ accent = "#010203"
         dir.path().join(name)
     }
 
-    fn parse_options<T: AsRef<std::ffi::OsStr>>(args: &[T]) -> Result<CliOptions> {
-        let cli = CliInterface::try_parse_from(
+    fn parse_cli<T: AsRef<std::ffi::OsStr>>(args: &[T]) -> Result<CliInterface> {
+        CliInterface::try_parse_from(
             std::iter::once(std::ffi::OsStr::new(BIN_NAME))
                 .chain(args.iter().map(|arg| arg.as_ref())),
-        )?;
-        CliOptions::try_from(cli)
+        )
+        .map_err(Error::from)
+    }
+
+    fn parse_options<T: AsRef<std::ffi::OsStr>>(args: &[T]) -> Result<CliOptions> {
+        CliOptions::try_from(parse_cli(args)?)
     }
 
     fn path_value(path: &Path) -> &str {
@@ -688,28 +683,35 @@ accent = "#010203"
         let language = "rust";
         let options = parse_cli_value(CliArgs::Lang, language).unwrap();
 
-        assert_eq!(options.lang.as_deref(), Some(language));
+        assert_eq!(options.lang.as_ref(), language);
     }
 
     #[test]
-    fn accept_stdio_without_a_language_and_reject_single_input_arguments() {
-        let options = parse_options(&[CliArgs::Stdio.as_str()]).unwrap();
-
-        assert!(options.stdio);
-        assert!(options.lang.is_none());
+    fn accept_only_dedicated_daemon_subcommands() {
+        const DAEMON: &str = "daemon";
+        const SPAWN: &str = "spawn";
+        const KILL: &str = "kill";
+        const LANGUAGE: &str = "rust";
 
         [
-            vec![CliArgs::Stdio.as_str(), STUB_FILE],
-            vec![CliArgs::Stdio.as_str(), CliArgs::Lang.as_str(), "rust"],
+            (SPAWN, lighter::server::DaemonAction::Spawn),
+            (KILL, lighter::server::DaemonAction::Kill),
         ]
         .into_iter()
-        .for_each(|args| {
-            assert_matches!(
-                parse_options(&args),
-                Err(Error::Cli(error))
-                    if error.kind() == clap::error::ErrorKind::ArgumentConflict
-            );
+        .for_each(|(name, expected)| {
+            let cli = parse_cli(&[DAEMON, name]).unwrap();
+            assert_matches!(cli.command, Some(CliCommand::Daemon { action }) if action == expected);
         });
+
+        [
+            vec![DAEMON, SPAWN, STUB_FILE],
+            vec![STUB_FILE, DAEMON, SPAWN],
+            vec![CliArgs::Lang.as_str(), LANGUAGE, DAEMON, SPAWN],
+            vec![DAEMON, SPAWN, CliArgs::Lang.as_str(), LANGUAGE],
+            vec!["--daemon", SPAWN],
+        ]
+        .into_iter()
+        .for_each(|args| assert!(parse_cli(&args).is_err()));
     }
 
     #[test]
@@ -1018,159 +1020,5 @@ rust = "'"
         let error = read_input_from(None, FailingReader).unwrap_err();
 
         assert_matches!(error, Error::StdinRead(_));
-    }
-
-    struct ChunkedReader<R> {
-        inner: R,
-        chunk_size: usize,
-    }
-
-    impl<R: Read> Read for ChunkedReader<R> {
-        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-            let length = buf.len().min(self.chunk_size);
-            self.inner.read(&mut buf[..length])
-        }
-    }
-
-    fn request_frame(language: &str, source: &str) -> Vec<u8> {
-        let mut frame = format!("{language}{STDIO_LANGUAGE_SEPARATOR}{source}").into_bytes();
-        frame.push(STDIO_FRAME_TERMINATOR);
-        frame
-    }
-
-    fn response_frame(response: &str) -> Vec<u8> {
-        let mut frame = response.as_bytes().to_vec();
-        frame.push(STDIO_FRAME_TERMINATOR);
-        frame
-    }
-
-    #[test]
-    fn stdio_serves_partial_multiple_utf8_frames_and_stops_on_an_empty_frame() {
-        const FIRST_LANGUAGE: &str = "rust";
-        const FIRST_SOURCE: &str = "let value = 1;";
-        const SECOND_LANGUAGE: &str = "python";
-        const SECOND_SOURCE: &str = "print('😀')";
-        const IGNORED_SOURCE: &str = "ignored";
-        let requests = [
-            (FIRST_LANGUAGE, FIRST_SOURCE),
-            (SECOND_LANGUAGE, SECOND_SOURCE),
-        ];
-        let mut input = requests
-            .into_iter()
-            .flat_map(|(language, source)| request_frame(language, source))
-            .collect::<Vec<_>>();
-        input.push(STDIO_FRAME_TERMINATOR);
-        input.extend(request_frame(FIRST_LANGUAGE, IGNORED_SOURCE));
-        let reader = io::BufReader::new(ChunkedReader {
-            inner: io::Cursor::new(input),
-            chunk_size: 1,
-        });
-        let mut output = Vec::new();
-        let mut diagnostics = Vec::new();
-        let mut received = Vec::new();
-
-        serve_stdio(reader, &mut output, &mut diagnostics, |language, source| {
-            received.push((language.to_owned(), source.to_owned()));
-            Ok::<_, std::convert::Infallible>(format!("{language}:{source}"))
-        })
-        .unwrap();
-
-        let expected = requests
-            .into_iter()
-            .flat_map(|(language, source)| response_frame(&format!("{language}:{source}")))
-            .collect::<Vec<_>>();
-        assert_eq!(output, expected);
-        assert!(diagnostics.is_empty());
-        assert_eq!(
-            received,
-            requests
-                .into_iter()
-                .map(|(language, source)| (language.to_owned(), source.to_owned()))
-                .collect::<Vec<_>>()
-        );
-    }
-
-    #[test]
-    fn stdio_reports_malformed_frames_and_recovers_at_the_next_terminator() {
-        const MISSING_SEPARATOR: &str = "missing-separator";
-        const VALID_LANGUAGE: &str = "rust";
-        const VALID_SOURCE: &str = "valid";
-        const UNTERMINATED_SOURCE: &str = "unfinished";
-        let mut input = response_frame(MISSING_SEPARATOR);
-        input.extend(request_frame("", "empty language"));
-        let invalid_utf8_body = format!("{VALID_LANGUAGE}{STDIO_LANGUAGE_SEPARATOR}")
-            .bytes()
-            .chain([0xff])
-            .collect::<Vec<_>>();
-        input.extend(
-            invalid_utf8_body
-                .iter()
-                .copied()
-                .chain([STDIO_FRAME_TERMINATOR]),
-        );
-        input.extend(request_frame(VALID_LANGUAGE, VALID_SOURCE));
-        input.extend(
-            format!("{VALID_LANGUAGE}{STDIO_LANGUAGE_SEPARATOR}{UNTERMINATED_SOURCE}").as_bytes(),
-        );
-        let mut output = Vec::new();
-        let mut diagnostics = Vec::new();
-
-        serve_stdio(
-            io::Cursor::new(input),
-            &mut output,
-            &mut diagnostics,
-            |_language, source| Ok::<_, std::convert::Infallible>(source.to_owned()),
-        )
-        .unwrap();
-
-        let expected = ["", "", "", VALID_SOURCE, ""]
-            .into_iter()
-            .flat_map(response_frame)
-            .collect::<Vec<_>>();
-        assert_eq!(output, expected);
-        let diagnostics = String::from_utf8(diagnostics).unwrap();
-        assert!(diagnostics.contains(&RequestFrameError::MissingLanguageSeparator.to_string()));
-        assert!(diagnostics.contains(&RequestFrameError::EmptyLanguage.to_string()));
-        let invalid_utf8 = parse_request_frame(&invalid_utf8_body)
-            .unwrap_err()
-            .to_string();
-        assert!(diagnostics.contains(&invalid_utf8));
-        assert!(diagnostics.contains(&RequestFrameError::MissingTerminator.to_string()));
-    }
-
-    #[test]
-    fn stdio_reports_highlight_errors_and_continues_with_the_next_frame() {
-        const LANGUAGE: &str = "rust";
-        const FAILED_SOURCE: &str = "failed";
-        const VALID_SOURCE: &str = "valid";
-        const HIGHLIGHT_ERROR: &str = "highlight failed";
-        let mut input = [FAILED_SOURCE, VALID_SOURCE]
-            .into_iter()
-            .flat_map(|source| request_frame(LANGUAGE, source))
-            .collect::<Vec<_>>();
-        input.push(STDIO_FRAME_TERMINATOR);
-        let mut output = Vec::new();
-        let mut diagnostics = Vec::new();
-
-        serve_stdio(
-            io::Cursor::new(input),
-            &mut output,
-            &mut diagnostics,
-            |_language, source| match source {
-                FAILED_SOURCE => Err(HIGHLIGHT_ERROR),
-                source => Ok(source.to_owned()),
-            },
-        )
-        .unwrap();
-
-        let expected = ["", VALID_SOURCE]
-            .into_iter()
-            .flat_map(response_frame)
-            .collect::<Vec<_>>();
-        assert_eq!(output, expected);
-        assert_eq!(
-            String::from_utf8(diagnostics).unwrap(),
-            format!("{STDIO_DIAGNOSTIC_PREFIX} {HIGHLIGHT_ERROR}\n")
-        );
     }
 }

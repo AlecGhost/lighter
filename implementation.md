@@ -38,6 +38,23 @@ stdout
 
 Argument parsing (clap, similar to arborium-cli). Reads input from file/stdin. Detects language from file extension or `--lang` flag.
 
+The `daemon` subcommand is dispatched to `server.rs`; highlighting options remain
+on the normal file/stdin invocation and cannot be combined with daemon commands.
+
+### `server.rs`
+
+`lighter daemon spawn` launches a detached singleton process. While it is
+running, normal CLI invocations send their language and source to it over a Unix
+domain socket (or loopback IPC on Windows), allowing its LSP processes to remain
+alive between invocations. `lighter daemon kill` requests a clean shutdown.
+Without a live daemon, the CLI retains its standalone behavior.
+
+Daemon messages consist of a single-line JSON header followed by exactly the
+number of body bytes declared by `length`. Request headers contain `version`,
+`id`, `lang`, and `length`. Response headers contain `version`, the matching
+`id`, and `length`; failed responses additionally contain `error` and always
+have a zero length.
+
 Spawns LSP server processes based on which languages are encountered (main language + injection languages). Servers are started as child processes with piped stdio. Built-in table maps language names to commands (e.g. `rust` → `rust-analyzer`, `python` → `pylsp`).
 
 Calls into `lib.rs` for the highlight pipeline. Prints result.
