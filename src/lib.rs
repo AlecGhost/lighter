@@ -7,6 +7,7 @@ use std::str::FromStr;
 
 use arborium::advanced::{Span, spans_to_ansi, spans_to_html};
 use arborium::theme::Theme;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 mod latex;
@@ -27,7 +28,7 @@ pub struct Input<'a> {
 }
 
 /// An inclusive, one-based range of source lines to render.
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, Hash, PartialEq, Deserialize, Serialize)]
 pub struct LineRange {
     start: usize,
     end: Option<usize>,
@@ -68,7 +69,10 @@ fn parse_line_number(value: &str) -> std::result::Result<Option<usize>, LineRang
 #[error("expected a one-based line range: start:end, :end, or start:")]
 pub struct LineRangeError;
 
-#[derive(Debug, Default, Clone, Copy, Eq, PartialEq, clap::ValueEnum)]
+#[derive(
+    Debug, Default, Clone, Copy, Eq, Hash, PartialEq, clap::ValueEnum, Deserialize, Serialize,
+)]
+#[serde(rename_all = "lowercase")]
 pub enum Output {
     #[default]
     Ansi,
@@ -80,9 +84,18 @@ pub enum Output {
     Latex,
 }
 
+pub fn builtin_theme_parser() -> clap::builder::PossibleValuesParser {
+    clap::builder::PossibleValuesParser::new(
+        arborium::theme::builtin::all()
+            .into_iter()
+            .map(|theme| theme.name),
+    )
+}
+
 #[derive(Debug)]
 pub struct HighlightOptions {
     pub output: Output,
+    pub lsp: bool,
     pub tree_sitter: bool,
     pub theme: Theme,
     pub lines: Option<LineRange>,
@@ -92,6 +105,7 @@ impl Default for HighlightOptions {
     fn default() -> Self {
         Self {
             output: Output::Ansi,
+            lsp: true,
             theme: arborium_theme::builtin::catppuccin_mocha(),
             tree_sitter: true,
             lines: None,
@@ -139,6 +153,10 @@ impl Highlighter {
         }
     }
 
+    pub fn set_options(&mut self, options: HighlightOptions) {
+        self.options = options;
+    }
+
     /// Highlight source with tree-sitter syntax and LSP semantic information.
     pub fn highlight(&self, input: Input<'_>) -> Result<String> {
         let tree_sitter_spans = if self.options.tree_sitter {
@@ -148,13 +166,17 @@ impl Highlighter {
             Vec::new()
         };
 
-        let pattern_index = next_pattern_index(&tree_sitter_spans);
-        let lsp_spans = self
-            .registry
-            .try_borrow_mut()
-            .expect("Server registry already borrowed")
-            .get_server(input.lang.clone())?
-            .get_semantic_spans(input.source, input.path, pattern_index)?;
+        let lsp_spans = match self.options.lsp {
+            true => {
+                let pattern_index = next_pattern_index(&tree_sitter_spans);
+                self.registry
+                    .try_borrow_mut()
+                    .expect("Server registry already borrowed")
+                    .get_server(input.lang.clone())?
+                    .get_semantic_spans(input.source, input.path, pattern_index)?
+            }
+            false => Vec::new(),
+        };
 
         write_debug_spans(
             &mut std::io::stderr().lock(),
@@ -430,6 +452,30 @@ mauve = "#010203"
                 );
                 assert_eq!(rendered, "second");
             });
+    }
+
+    #[test]
+    fn disabled_lsp_does_not_request_a_server() {
+        const SOURCE: &str = "plain source";
+        let highlighter = Highlighter::with_options(
+            RefCell::new(lsp::ServerRegistry::default()),
+            HighlightOptions {
+                lsp: false,
+                tree_sitter: false,
+                ..HighlightOptions::default()
+            },
+            logging::LogLevel::default(),
+        );
+
+        let output = highlighter
+            .highlight(Input {
+                source: SOURCE,
+                path: None,
+                lang: LangName::from("no-server"),
+            })
+            .unwrap();
+
+        assert_eq!(output, SOURCE);
     }
 
     fn assert_ordered(text: &str, first: &str, second: &str) {

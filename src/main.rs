@@ -32,49 +32,12 @@ struct CliInterface {
     #[arg(short, long)]
     lang: Option<String>,
 
-    /// Path to a TOML config file
-    /// that configures the theme and maps language names to LSP server commands.
-    /// Falls back to built-in defaults when omitted.
-    #[arg(short, long)]
-    config: Option<PathBuf>,
-
-    /// Name of a built-in Arborium theme.
-    #[arg(
-        long,
-        conflicts_with = "custom_theme",
-        ignore_case = true,
-        value_parser = builtin_theme_parser()
-    )]
-    theme: Option<String>,
-
-    /// Path to a custom TOML theme file.
-    #[arg(long, conflicts_with = "theme")]
-    custom_theme: Option<PathBuf>,
-
-    /// Output highlighted ANSI, HTML, or LaTeX.
-    #[arg(short, long, value_enum, default_value_t = lighter::Output::Ansi)]
-    format: lighter::Output,
+    #[command(flatten)]
+    startup: lighter::server::StartupOptions,
 
     /// Inclusive, one-based line range to output (start:end, :end, or start:).
     #[arg(long, value_name = "RANGE")]
     lines: Option<lighter::LineRange>,
-
-    /// Disable LSP semantic highlighting.
-    #[arg(long)]
-    no_lsp: bool,
-
-    /// Disable tree-sitter syntax highlighting.
-    #[arg(long)]
-    no_tree_sitter: bool,
-
-    /// Set stderr logging verbosity.
-    #[arg(
-        long,
-        value_enum,
-        ignore_case = true,
-        default_value_t = logging::LogLevel::Error
-    )]
-    log: logging::LogLevel,
 }
 
 #[derive(Debug, Subcommand)]
@@ -84,14 +47,6 @@ enum CliCommand {
         #[command(subcommand)]
         action: lighter::server::DaemonAction,
     },
-}
-
-fn builtin_theme_parser() -> clap::builder::PossibleValuesParser {
-    clap::builder::PossibleValuesParser::new(
-        arborium::theme::builtin::all()
-            .into_iter()
-            .map(|theme| theme.name),
-    )
 }
 
 #[derive(Error, Debug)]
@@ -190,7 +145,7 @@ enum CaptureMapping {
     Language(HashMap<String, String>),
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Deserialize)]
 #[serde(untagged)]
 enum ThemeConfig {
     Builtin(String),
@@ -212,7 +167,7 @@ impl ThemeConfig {
 }
 
 /// A `RawConfig` parsed into runtime configuration.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct Config {
     commands: lsp::Commands,
     general_mapping: lsp::CaptureMapping,
@@ -327,6 +282,9 @@ struct CliOptions {
     format: lighter::Output,
     lines: Option<lighter::LineRange>,
     no_tree_sitter: bool,
+    no_lsp: bool,
+    request_format: Option<lighter::Output>,
+    config_path: Option<PathBuf>,
 }
 
 impl TryFrom<CliInterface> for CliOptions {
@@ -334,19 +292,19 @@ impl TryFrom<CliInterface> for CliOptions {
 
     fn try_from(cli: CliInterface) -> Result<Self> {
         let lang = CliOptions::resolve_language(cli.lang.as_deref(), cli.file.as_deref())?;
-        let config = Config::load(cli.no_lsp, cli.config.as_deref())?;
+        let startup = resolve_startup_paths(cli.startup)?;
+        let config = Config::load(startup.no_lsp, startup.config.as_deref())?;
         let theme = CliOptions::load_theme(
-            cli.theme.as_deref(),
-            cli.custom_theme.as_deref(),
+            startup.theme.as_deref(),
+            startup.custom_theme.as_deref(),
             config.theme.as_ref(),
         )?;
+        let format = startup.format.unwrap_or_default();
+        let log = startup.log.unwrap_or_default();
         let CliInterface {
             file,
             project,
-            format,
             lines,
-            no_tree_sitter,
-            log,
             ..
         } = cli;
         Ok(Self {
@@ -358,9 +316,26 @@ impl TryFrom<CliInterface> for CliOptions {
             log,
             format,
             lines,
-            no_tree_sitter,
+            no_tree_sitter: startup.no_tree_sitter,
+            no_lsp: startup.no_lsp,
+            request_format: startup.format,
+            config_path: startup.config,
         })
     }
+}
+
+fn resolve_startup_paths(
+    mut options: lighter::server::StartupOptions,
+) -> Result<lighter::server::StartupOptions> {
+    options.config = options
+        .config
+        .map(|path| fs::canonicalize(&path).map_err(|source| Error::ConfigRead { path, source }))
+        .transpose()?;
+    options.custom_theme = options
+        .custom_theme
+        .map(|path| fs::canonicalize(&path).map_err(|source| Error::ThemeRead { path, source }))
+        .transpose()?;
+    Ok(options)
 }
 
 impl CliOptions {
@@ -440,30 +415,49 @@ fn read_input_from(path: Option<&Path>, mut stdin: impl Read) -> Result<String> 
     }
 }
 
-fn highlighter(options: &CliOptions) -> Result<lighter::Highlighter> {
+fn create_highlighter(
+    config: Config,
+    project: Option<&Path>,
+    log: logging::LogLevel,
+    options: lighter::HighlightOptions,
+) -> Result<lighter::Highlighter> {
     let registry = RefCell::new(lsp::ServerRegistry::new(
-        options.config.commands.clone(),
-        options.config.general_mapping.clone(),
-        options.config.lang_mapping.clone(),
+        config.commands,
+        config.general_mapping,
+        config.lang_mapping,
+        project,
+        log,
+    )?);
+    Ok(lighter::Highlighter::with_options(registry, options, log))
+}
+
+fn highlighter(options: &CliOptions) -> Result<lighter::Highlighter> {
+    create_highlighter(
+        options.config.clone(),
         options.project.as_deref(),
         options.log,
-    )?);
-    Ok(lighter::Highlighter::with_options(
-        registry,
         lighter::HighlightOptions {
             output: options.format,
+            lsp: !options.no_lsp,
             tree_sitter: !options.no_tree_sitter,
             theme: options.theme.clone(),
             lines: options.lines,
         },
-        options.log,
-    ))
+    )
 }
 
 fn run_once(options: &CliOptions, paths: &lighter::server::DaemonPaths) -> Result<()> {
     let source = read_input(options.file.as_deref())?;
     let language = options.lang.as_ref();
-    let output = match lighter::server::highlight(paths, language, &source)? {
+    let request_options = lighter::server::RequestOptions {
+        project: options.project.clone(),
+        lines: options.lines,
+        no_tree_sitter: options.no_tree_sitter,
+        no_lsp: options.no_lsp,
+        format: options.request_format,
+        config: options.config_path.clone(),
+    };
+    let output = match lighter::server::highlight(paths, language, &source, &request_options)? {
         Some(output) => output,
         None => highlighter(options)?.highlight(lighter::Input {
             source: &source,
@@ -475,12 +469,123 @@ fn run_once(options: &CliOptions, paths: &lighter::server::DaemonPaths) -> Resul
     Ok(())
 }
 
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct DaemonHighlighterKey {
+    project: Option<PathBuf>,
+}
+
+struct DaemonState {
+    startup: lighter::server::StartupOptions,
+    config_path: Option<PathBuf>,
+    config: Config,
+    theme: arborium::theme::Theme,
+    highlighters: HashMap<DaemonHighlighterKey, lighter::Highlighter>,
+}
+
+impl DaemonState {
+    fn new(startup: lighter::server::StartupOptions) -> Result<Self> {
+        let startup = resolve_startup_paths(startup)?;
+        let config = Config::load(false, startup.config.as_deref())?;
+        let theme = CliOptions::load_theme(
+            startup.theme.as_deref(),
+            startup.custom_theme.as_deref(),
+            config.theme.as_ref(),
+        )?;
+        Ok(Self {
+            config_path: startup.config.clone(),
+            startup,
+            config,
+            theme,
+            highlighters: HashMap::new(),
+        })
+    }
+
+    fn highlight(
+        &mut self,
+        language: &str,
+        source: &str,
+        request: &lighter::server::RequestOptions,
+    ) -> Result<String> {
+        self.apply_config(request.config.as_deref())?;
+        let key = DaemonHighlighterKey {
+            project: request.project.clone(),
+        };
+        if let std::collections::hash_map::Entry::Vacant(entry) =
+            self.highlighters.entry(key.clone())
+        {
+            let log = self.startup.log.unwrap_or_default();
+            let highlighter = create_highlighter(
+                self.config.clone(),
+                key.project.as_deref(),
+                log,
+                lighter::HighlightOptions::default(),
+            )?;
+            entry.insert(highlighter);
+        }
+        let highlighter = self
+            .highlighters
+            .get_mut(&key)
+            .expect("highlighter was inserted");
+        highlighter.set_options(lighter::HighlightOptions {
+            output: request.format.or(self.startup.format).unwrap_or_default(),
+            lsp: !(self.startup.no_lsp || request.no_lsp),
+            tree_sitter: !(self.startup.no_tree_sitter || request.no_tree_sitter),
+            theme: self.theme.clone(),
+            lines: request.lines,
+        });
+        highlighter
+            .highlight(lighter::Input {
+                source,
+                path: None,
+                lang: lighter::LangName::from(language),
+            })
+            .map_err(Error::from)
+    }
+
+    fn apply_config(&mut self, path: Option<&Path>) -> Result<()> {
+        let Some(path) = path.filter(|path| Some(*path) != self.config_path.as_deref()) else {
+            return Ok(());
+        };
+        let config = Config::load(false, Some(path))?;
+        let theme = CliOptions::load_theme(
+            self.startup.theme.as_deref(),
+            self.startup.custom_theme.as_deref(),
+            config.theme.as_ref(),
+        )?;
+
+        self.highlighters.clear();
+        self.config_path = Some(path.to_owned());
+        self.config = config;
+        self.theme = theme;
+        Ok(())
+    }
+}
+
+fn run_daemon(action: lighter::server::DaemonAction) -> Result<()> {
+    let paths = lighter::server::DaemonPaths::discover();
+    match action {
+        lighter::server::DaemonAction::Spawn { options } => {
+            let state = DaemonState::new(options)?;
+            lighter::server::spawn(&paths, &state.startup).map_err(Error::from)
+        }
+        lighter::server::DaemonAction::Kill => lighter::server::kill(&paths).map_err(Error::from),
+        lighter::server::DaemonAction::Serve { options } => {
+            lighter::server::detach();
+            let mut state = DaemonState::new(options)?;
+            lighter::server::serve(&paths, |language, source, request| {
+                state.highlight(language, source, request)
+            })
+            .map_err(Error::from)
+        }
+    }
+}
+
 fn main() -> Result<()> {
     let cli = CliInterface::parse();
     let paths = lighter::server::DaemonPaths::discover();
-    match cli.command.as_ref() {
+    match cli.command {
         Some(CliCommand::Daemon { action }) => {
-            return lighter::server::run(*action).map_err(Error::from);
+            return run_daemon(action);
         }
         None => {}
     }
@@ -499,6 +604,9 @@ mod tests {
     const CONFIG_FILE_NAME: &str = "config.toml";
     const CUSTOM_THEME_NAME: &str = "Config custom theme";
     const UNKNOWN_THEME_NAME: &str = "unknown-theme";
+    const DAEMON: &str = "daemon";
+    const SPAWN: &str = "spawn";
+    const KILL: &str = "kill";
     const CUSTOM_THEME_BODY: &str = r##"
 variant = "light"
 
@@ -515,6 +623,7 @@ accent = "#010203"
         Lang,
         Lines,
         NoLsp,
+        NoTreeSitter,
         Project,
         Log,
         Theme,
@@ -530,6 +639,7 @@ accent = "#010203"
                 CliArgs::Lines => "--lines",
                 CliArgs::Log => "--log",
                 CliArgs::NoLsp => "--no-lsp",
+                CliArgs::NoTreeSitter => "--no-tree-sitter",
                 CliArgs::Project => "--project",
                 CliArgs::Theme => "--theme",
             }
@@ -688,30 +798,88 @@ accent = "#010203"
 
     #[test]
     fn accept_only_dedicated_daemon_subcommands() {
-        const DAEMON: &str = "daemon";
-        const SPAWN: &str = "spawn";
-        const KILL: &str = "kill";
         const LANGUAGE: &str = "rust";
 
-        [
-            (SPAWN, lighter::server::DaemonAction::Spawn),
-            (KILL, lighter::server::DaemonAction::Kill),
-        ]
-        .into_iter()
-        .for_each(|(name, expected)| {
-            let cli = parse_cli(&[DAEMON, name]).unwrap();
-            assert_matches!(cli.command, Some(CliCommand::Daemon { action }) if action == expected);
-        });
+        let spawn = parse_cli(&[DAEMON, SPAWN]).unwrap();
+        assert_matches!(
+            spawn.command,
+            Some(CliCommand::Daemon {
+                action: lighter::server::DaemonAction::Spawn { options }
+            }) if options == lighter::server::StartupOptions::default()
+        );
+        let kill = parse_cli(&[DAEMON, KILL]).unwrap();
+        assert_matches!(
+            kill.command,
+            Some(CliCommand::Daemon {
+                action: lighter::server::DaemonAction::Kill
+            })
+        );
 
         [
             vec![DAEMON, SPAWN, STUB_FILE],
             vec![STUB_FILE, DAEMON, SPAWN],
             vec![CliArgs::Lang.as_str(), LANGUAGE, DAEMON, SPAWN],
             vec![DAEMON, SPAWN, CliArgs::Lang.as_str(), LANGUAGE],
+            vec![DAEMON, SPAWN, CliArgs::Project.as_str(), "."],
+            vec![DAEMON, SPAWN, CliArgs::Lines.as_str(), "1:2"],
             vec!["--daemon", SPAWN],
         ]
         .into_iter()
         .for_each(|args| assert!(parse_cli(&args).is_err()));
+    }
+
+    #[test]
+    fn daemon_spawn_accepts_startup_options() {
+        let theme = builtin_themes().into_iter().next().unwrap();
+        let config = temp_file(CONFIG_FILE_NAME, "");
+        let args = [
+            DAEMON,
+            SPAWN,
+            CliArgs::Config.as_str(),
+            path_value(config.path()),
+            CliArgs::Theme.as_str(),
+            theme.name.as_str(),
+            CliArgs::Format.as_str(),
+            "html",
+            CliArgs::NoLsp.as_str(),
+            CliArgs::NoTreeSitter.as_str(),
+            CliArgs::Log.as_str(),
+            "debug",
+        ];
+
+        let cli = parse_cli(&args).unwrap();
+
+        assert_matches!(
+            cli.command,
+            Some(CliCommand::Daemon {
+                action: lighter::server::DaemonAction::Spawn { options }
+            }) if options.config.as_deref() == Some(config.path())
+                && options.theme.as_deref() == Some(theme.name.as_str())
+                && options.format == Some(lighter::Output::Html)
+                && options.no_lsp
+                && options.no_tree_sitter
+                && options.log == Some(logging::LogLevel::Debug)
+        );
+    }
+
+    #[test]
+    fn daemon_spawn_accepts_custom_theme() {
+        let theme = temp_file(".toml", &custom_theme_source());
+
+        let cli = parse_cli(&[
+            DAEMON,
+            SPAWN,
+            CliArgs::CustomTheme.as_str(),
+            path_value(theme.path()),
+        ])
+        .unwrap();
+
+        assert_matches!(
+            cli.command,
+            Some(CliCommand::Daemon {
+                action: lighter::server::DaemonAction::Spawn { options }
+            }) if options.custom_theme.as_deref() == Some(theme.path())
+        );
     }
 
     #[test]
@@ -758,6 +926,60 @@ accent = "#010203"
 
         assert_eq!(&cmd, parsed_command);
         assert_eq!(mapping, options.config.lang_mapping);
+        assert!(options.config_path.unwrap().is_absolute());
+    }
+
+    #[test]
+    fn config_change_replaces_daemon_highlighters() {
+        let initial = temp_file(CONFIG_FILE_NAME, "");
+        let replacement_theme = builtin_themes().into_iter().next().unwrap();
+        let replacement = temp_file(
+            CONFIG_FILE_NAME,
+            &builtin_theme_config(&replacement_theme.name),
+        );
+        let mut state = DaemonState::new(lighter::server::StartupOptions {
+            config: Some(initial.path().to_owned()),
+            ..Default::default()
+        })
+        .unwrap();
+        let key = DaemonHighlighterKey { project: None };
+        state
+            .highlighters
+            .insert(key, lighter::Highlighter::default());
+        let replacement = fs::canonicalize(replacement.path()).unwrap();
+
+        state.apply_config(Some(&replacement)).unwrap();
+
+        assert!(state.highlighters.is_empty());
+        assert_eq!(state.config_path.as_deref(), Some(replacement.as_path()));
+        assert_eq!(state.theme.name, replacement_theme.name);
+    }
+
+    #[test]
+    fn daemon_reuses_project_registry_across_dynamic_render_options() {
+        const SOURCE: &str = "first\nVec<Span>\n";
+        let mut state = DaemonState::new(lighter::server::StartupOptions {
+            no_lsp: true,
+            no_tree_sitter: true,
+            ..Default::default()
+        })
+        .unwrap();
+        let first = lighter::server::RequestOptions {
+            lines: Some("1:1".parse().unwrap()),
+            ..Default::default()
+        };
+        let second = lighter::server::RequestOptions {
+            lines: Some("2:2".parse().unwrap()),
+            format: Some(lighter::Output::Html),
+            ..Default::default()
+        };
+
+        let first_output = state.highlight("rust", SOURCE, &first).unwrap();
+        let second_output = state.highlight("rust", SOURCE, &second).unwrap();
+
+        assert_eq!(first_output, "first");
+        assert_eq!(second_output, "Vec&lt;Span&gt;");
+        assert_eq!(state.highlighters.len(), 1);
     }
 
     #[test]
@@ -845,10 +1067,11 @@ accent = "#010203"
     #[test]
     fn reject_invalid_theme_config_shape() {
         let file = temp_file(CONFIG_FILE_NAME, "theme = { name = \"invalid\" }");
+        let path = fs::canonicalize(file.path()).unwrap();
 
         let error = parse_cli_value(CliArgs::Config, path_value(file.path())).unwrap_err();
 
-        assert_matches!(error, Error::InvalidConfig { path, .. } if path == file.path());
+        assert_matches!(error, Error::InvalidConfig { path: error_path, .. } if error_path == path);
     }
 
     #[test]
@@ -920,10 +1143,11 @@ rust = " "
     #[test]
     fn reject_invalid_config() {
         let file = temp_file(".toml", "=");
+        let path = fs::canonicalize(file.path()).unwrap();
 
         let error = parse_cli_value(CliArgs::Config, path_value(file.path())).unwrap_err();
 
-        assert_matches!(error, Error::InvalidConfig { path, .. } if path == file.path());
+        assert_matches!(error, Error::InvalidConfig { path: error_path, .. } if error_path == path);
     }
 
     #[test]
@@ -957,10 +1181,11 @@ rust = "'"
     #[test]
     fn reject_invalid_custom_theme() {
         let file = temp_file(".toml", "=");
+        let path = fs::canonicalize(file.path()).unwrap();
 
         let error = parse_cli_value(CliArgs::CustomTheme, path_value(file.path())).unwrap_err();
 
-        assert_matches!(error, Error::InvalidTheme { path, .. } if path == file.path());
+        assert_matches!(error, Error::InvalidTheme { path: error_path, .. } if error_path == path);
     }
 
     #[test]

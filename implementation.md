@@ -38,8 +38,10 @@ stdout
 
 Argument parsing (clap, similar to arborium-cli). Reads input from file/stdin. Detects language from file extension or `--lang` flag.
 
-The `daemon` subcommand is dispatched to `server.rs`; highlighting options remain
-on the normal file/stdin invocation and cannot be combined with daemon commands.
+The `daemon` subcommand is dispatched to `server.rs`. Its `spawn` action accepts
+the config, theme, custom-theme, format, no-LSP, no-tree-sitter, and logging
+options as daemon defaults. File, project, language, and line selection remain
+exclusive to normal file/stdin invocations.
 
 ### `server.rs`
 
@@ -51,9 +53,12 @@ Without a live daemon, the CLI retains its standalone behavior.
 
 Daemon messages consist of a single-line JSON header followed by exactly the
 number of body bytes declared by `length`. Request headers contain `version`,
-`id`, `lang`, and `length`. Response headers contain `version`, the matching
-`id`, and `length`; failed responses additionally contain `error` and always
-have a zero length.
+`id`, `lang`, and `length`, plus optional project, lines, no-tree-sitter,
+no-LSP, format, and absolute config-path overrides. Response headers contain
+`version`, the matching `id`, and `length`; failed responses additionally
+contain `error` and always have a zero length. A config override replaces the
+daemon's current config and drops its highlighter cache, cleanly shutting down
+the associated LSP registries before subsequent requests create replacements.
 
 Spawns LSP server processes based on which languages are encountered (main language + injection languages). Servers are started as child processes with piped stdio. Built-in table maps language names to commands (e.g. `rust` → `rust-analyzer`, `python` → `pylsp`).
 

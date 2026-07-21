@@ -5,7 +5,7 @@ use std::process::{self, Command, Stdio};
 use std::thread;
 use std::time::Duration;
 
-use clap::Subcommand;
+use clap::{Args, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -17,7 +17,15 @@ const LOCK_FILE: &str = "daemon.lock";
 const HEADER_TERMINATOR: u8 = b'\n';
 const STOP_LANGUAGE: &str = "lighter-internal-stop";
 const CLIENT_REQUEST_ID: u64 = 1;
-const DAEMON_SERVE_ARGUMENTS: [&str; 2] = ["daemon", "serve"];
+const DAEMON_ARGUMENT: &str = "daemon";
+const SERVE_ARGUMENT: &str = "serve";
+const CONFIG_ARGUMENT: &str = "--config";
+const THEME_ARGUMENT: &str = "--theme";
+const CUSTOM_THEME_ARGUMENT: &str = "--custom-theme";
+const FORMAT_ARGUMENT: &str = "--format";
+const NO_LSP_ARGUMENT: &str = "--no-lsp";
+const NO_TREE_SITTER_ARGUMENT: &str = "--no-tree-sitter";
+const LOG_ARGUMENT: &str = "--log";
 const STARTUP_ATTEMPTS: usize = 250;
 const STARTUP_POLL_INTERVAL: Duration = Duration::from_millis(20);
 
@@ -57,14 +65,111 @@ pub enum Error {
     StartupTimeout,
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Subcommand)]
+#[derive(Debug, Clone, Default, Eq, PartialEq, Args)]
+pub struct StartupOptions {
+    /// Path to a TOML config file.
+    #[arg(short, long)]
+    pub config: Option<PathBuf>,
+
+    /// Name of a built-in Arborium theme.
+    #[arg(
+        long,
+        conflicts_with = "custom_theme",
+        ignore_case = true,
+        value_parser = crate::builtin_theme_parser()
+    )]
+    pub theme: Option<String>,
+
+    /// Path to a custom TOML theme file.
+    #[arg(long, conflicts_with = "theme")]
+    pub custom_theme: Option<PathBuf>,
+
+    /// Output highlighted ANSI, HTML, or LaTeX.
+    #[arg(short, long, value_enum)]
+    pub format: Option<crate::Output>,
+
+    /// Disable LSP semantic highlighting.
+    #[arg(long)]
+    pub no_lsp: bool,
+
+    /// Disable tree-sitter syntax highlighting.
+    #[arg(long)]
+    pub no_tree_sitter: bool,
+
+    /// Set stderr logging verbosity.
+    #[arg(long, value_enum, ignore_case = true)]
+    pub log: Option<crate::logging::LogLevel>,
+}
+
+impl StartupOptions {
+    fn append_arguments(&self, command: &mut Command) {
+        if let Some(path) = &self.config {
+            command.arg(CONFIG_ARGUMENT).arg(path);
+        }
+        if let Some(theme) = &self.theme {
+            command.arg(THEME_ARGUMENT).arg(theme);
+        }
+        if let Some(path) = &self.custom_theme {
+            command.arg(CUSTOM_THEME_ARGUMENT).arg(path);
+        }
+        if let Some(format) = self.format {
+            command.arg(FORMAT_ARGUMENT).arg(
+                format
+                    .to_possible_value()
+                    .expect("output has a value")
+                    .get_name(),
+            );
+        }
+        if self.no_lsp {
+            command.arg(NO_LSP_ARGUMENT);
+        }
+        if self.no_tree_sitter {
+            command.arg(NO_TREE_SITTER_ARGUMENT);
+        }
+        if let Some(log) = self.log {
+            command.arg(LOG_ARGUMENT).arg(
+                log.to_possible_value()
+                    .expect("log level has a value")
+                    .get_name(),
+            );
+        }
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Subcommand)]
 pub enum DaemonAction {
     /// Spawn the background daemon.
-    Spawn,
+    Spawn {
+        #[command(flatten)]
+        options: StartupOptions,
+    },
     /// Kill the background daemon.
     Kill,
     #[command(hide = true)]
-    Serve,
+    Serve {
+        #[command(flatten)]
+        options: StartupOptions,
+    },
+}
+
+#[derive(Debug, Clone, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RequestOptions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lines: Option<crate::LineRange>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub no_tree_sitter: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub no_lsp: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<crate::Output>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config: Option<PathBuf>,
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
@@ -73,6 +178,8 @@ struct RequestHeader {
     id: u64,
     lang: String,
     length: usize,
+    #[serde(flatten)]
+    options: RequestOptions,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
@@ -157,7 +264,13 @@ fn read_header<T: serde::de::DeserializeOwned>(input: &mut impl BufRead) -> Resu
     }
 }
 
-fn write_request(mut output: impl Write, id: u64, language: &str, source: &[u8]) -> Result<()> {
+fn write_request(
+    mut output: impl Write,
+    id: u64,
+    language: &str,
+    source: &[u8],
+    options: &RequestOptions,
+) -> Result<()> {
     write_header(
         &mut output,
         &RequestHeader {
@@ -165,6 +278,7 @@ fn write_request(mut output: impl Write, id: u64, language: &str, source: &[u8])
             id,
             lang: language.to_owned(),
             length: source.len(),
+            options: options.clone(),
         },
     )?;
     output.write_all(source)?;
@@ -345,7 +459,7 @@ impl Drop for EndpointGuard<'_> {
 
 fn handle_request<F, E>(request: Request, mut output: impl Write, highlight: &mut F) -> Result<bool>
 where
-    F: FnMut(&str, &str) -> std::result::Result<String, E>,
+    F: FnMut(&str, &str, &RequestOptions) -> std::result::Result<String, E>,
     E: std::fmt::Display,
 {
     let id = request.header.id;
@@ -375,7 +489,7 @@ where
             return Ok(false);
         }
     };
-    match highlight(&request.header.lang, &source) {
+    match highlight(&request.header.lang, &source, &request.header.options) {
         Ok(response) => write_response(&mut output, id, &response)?,
         Err(error) => write_error_response(&mut output, id, &error.to_string())?,
     }
@@ -384,7 +498,7 @@ where
 
 fn serve_connection<F, E>(stream: &mut local::Stream, highlight: &mut F) -> Result<bool>
 where
-    F: FnMut(&str, &str) -> std::result::Result<String, E>,
+    F: FnMut(&str, &str, &RequestOptions) -> std::result::Result<String, E>,
     E: std::fmt::Display,
 {
     let request = read_request(&mut BufReader::new(&mut *stream))?;
@@ -397,7 +511,7 @@ where
 /// Acquire the singleton lock and serve highlight requests until a stop request arrives.
 pub fn serve<F, E>(paths: &DaemonPaths, mut highlight: F) -> Result<()>
 where
-    F: FnMut(&str, &str) -> std::result::Result<String, E>,
+    F: FnMut(&str, &str, &RequestOptions) -> std::result::Result<String, E>,
     E: std::fmt::Display,
 {
     local::prepare_directory(&paths.directory).map_err(Error::RuntimeDirectory)?;
@@ -424,42 +538,58 @@ fn unavailable(error: &io::Error) -> bool {
     )
 }
 
-fn exchange(paths: &DaemonPaths, language: &str, source: &str) -> Result<Option<String>> {
+fn exchange(
+    paths: &DaemonPaths,
+    language: &str,
+    source: &str,
+    options: &RequestOptions,
+) -> Result<Option<String>> {
     let mut stream = match local::connect(paths) {
         Ok(stream) => stream,
         Err(error) if unavailable(&error) => return Ok(None),
         Err(error) => return Err(Error::Io(error)),
     };
-    write_request(&mut stream, CLIENT_REQUEST_ID, language, source.as_bytes())?;
+    write_request(
+        &mut stream,
+        CLIENT_REQUEST_ID,
+        language,
+        source.as_bytes(),
+        options,
+    )?;
     let response = read_response(&mut BufReader::new(stream))?;
     response_result(response, CLIENT_REQUEST_ID).map(Some)
 }
 
 /// Use the daemon when it is running, or return `None` when no daemon is available.
-pub fn highlight(paths: &DaemonPaths, language: &str, source: &str) -> Result<Option<String>> {
-    exchange(paths, language, source)
+pub fn highlight(
+    paths: &DaemonPaths,
+    language: &str,
+    source: &str,
+    options: &RequestOptions,
+) -> Result<Option<String>> {
+    exchange(paths, language, source, options)
 }
 
 pub fn is_running(paths: &DaemonPaths) -> bool {
     local::connect(paths).is_ok()
 }
 
-fn kill(paths: &DaemonPaths) -> Result<()> {
-    match exchange(paths, STOP_LANGUAGE, "")? {
+pub fn kill(paths: &DaemonPaths) -> Result<()> {
+    match exchange(paths, STOP_LANGUAGE, "", &RequestOptions::default())? {
         Some(_) => Ok(()),
         None => Err(Error::NotRunning),
     }
 }
 
 #[cfg(unix)]
-fn detach() {
+pub fn detach() {
     let _ = unsafe { libc::setsid() };
 }
 
 #[cfg(windows)]
-fn detach() {}
+pub fn detach() {}
 
-fn spawn(paths: &DaemonPaths) -> Result<()> {
+pub fn spawn(paths: &DaemonPaths, options: &StartupOptions) -> Result<()> {
     if is_running(paths) {
         return Err(Error::AlreadyRunning);
     }
@@ -467,10 +597,11 @@ fn spawn(paths: &DaemonPaths) -> Result<()> {
     let executable = std::env::current_exe().map_err(Error::CurrentExecutable)?;
     let mut command = Command::new(executable);
     command
-        .args(DAEMON_SERVE_ARGUMENTS)
+        .args([DAEMON_ARGUMENT, SERVE_ARGUMENT])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    options.append_arguments(&mut command);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -497,28 +628,6 @@ fn spawn(paths: &DaemonPaths) -> Result<()> {
         .unwrap_or(Err(Error::StartupTimeout))
 }
 
-fn run_server(paths: &DaemonPaths) -> Result<()> {
-    detach();
-    let highlighter = crate::Highlighter::default();
-    serve(paths, |language, source| {
-        highlighter.highlight(crate::Input {
-            source,
-            path: None,
-            lang: crate::LangName::from(language),
-        })
-    })
-}
-
-/// Execute a daemon lifecycle subcommand.
-pub fn run(action: DaemonAction) -> Result<()> {
-    let paths = DaemonPaths::discover();
-    match action {
-        DaemonAction::Spawn => spawn(&paths),
-        DaemonAction::Kill => kill(&paths),
-        DaemonAction::Serve => run_server(&paths),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -535,6 +644,7 @@ mod tests {
             id,
             lang: language.to_owned(),
             length: source.len(),
+            options: RequestOptions::default(),
         };
         let mut request = serde_json::to_vec(&header).unwrap();
         request.push(HEADER_TERMINATOR);
@@ -549,8 +659,23 @@ mod tests {
     #[test]
     fn request_uses_json_header_and_exact_utf8_byte_length() {
         let mut bytes = Vec::new();
+        let options = RequestOptions {
+            project: Some(PathBuf::from("project")),
+            lines: Some("2:4".parse().unwrap()),
+            no_tree_sitter: true,
+            no_lsp: true,
+            format: Some(crate::Output::Html),
+            config: Some(PathBuf::from("/tmp/lighter-config.toml")),
+        };
 
-        write_request(&mut bytes, REQUEST_ID, LANGUAGE, SOURCE.as_bytes()).unwrap();
+        write_request(
+            &mut bytes,
+            REQUEST_ID,
+            LANGUAGE,
+            SOURCE.as_bytes(),
+            &options,
+        )
+        .unwrap();
 
         let mut input = BufReader::new(io::Cursor::new(bytes));
         let request = read_request(&mut input).unwrap().unwrap();
@@ -558,6 +683,7 @@ mod tests {
         assert_eq!(request.header.id, REQUEST_ID);
         assert_eq!(request.header.lang, LANGUAGE);
         assert_eq!(request.header.length, SOURCE.len());
+        assert_eq!(request.header.options, options);
         assert_eq!(request.source, SOURCE.as_bytes());
     }
 
@@ -569,12 +695,13 @@ mod tests {
                 id: REQUEST_ID,
                 lang: LANGUAGE.to_owned(),
                 length: SOURCE.len(),
+                options: RequestOptions::default(),
             },
             source: SOURCE.as_bytes().to_vec(),
         };
         let mut output = Vec::new();
 
-        let stop = handle_request(request, &mut output, &mut |_language, _source| {
+        let stop = handle_request(request, &mut output, &mut |_language, _source, _options| {
             Ok::<_, std::convert::Infallible>(OUTPUT.to_owned())
         })
         .unwrap();
@@ -596,7 +723,7 @@ mod tests {
             .unwrap();
         let mut output = Vec::new();
 
-        handle_request(request, &mut output, &mut |_language, _source| {
+        handle_request(request, &mut output, &mut |_language, _source, _options| {
             Err::<String, _>(HIGHLIGHT_ERROR)
         })
         .unwrap();
@@ -609,14 +736,14 @@ mod tests {
 
     #[test]
     fn unsupported_version_returns_an_error_with_the_request_id() {
-        const UNSUPPORTED_VERSION: &str = "2";
+        const UNSUPPORTED_VERSION: &str = "unsupported";
         let input = encoded_request(UNSUPPORTED_VERSION, REQUEST_ID, LANGUAGE, SOURCE.as_bytes());
         let request = read_request(&mut BufReader::new(io::Cursor::new(input)))
             .unwrap()
             .unwrap();
         let mut output = Vec::new();
 
-        handle_request(request, &mut output, &mut |_language, _source| {
+        handle_request(request, &mut output, &mut |_language, _source, _options| {
             Ok::<_, std::convert::Infallible>(OUTPUT.to_owned())
         })
         .unwrap();
