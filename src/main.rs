@@ -1,16 +1,79 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
-use lighter::logging;
-use lighter::lsp;
-
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
+use lighter::{daemon, logging};
+use serde::Deserialize;
 use thiserror::Error;
 
 const BIN_NAME: &str = "lighter";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CommandName {
+    Daemon,
+    Spawn,
+    Kill,
+    Serve,
+}
+
+impl CommandName {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Daemon => "daemon",
+            Self::Spawn => "spawn",
+            Self::Kill => "kill",
+            Self::Serve => "serve",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OptionName {
+    Config,
+    Theme,
+    CustomTheme,
+    Format,
+    Project,
+    Lang,
+    Lines,
+    NoLsp,
+    NoTreeSitter,
+    Log,
+}
+
+impl OptionName {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Config => "config",
+            Self::Theme => "theme",
+            Self::CustomTheme => "custom-theme",
+            Self::Format => "format",
+            Self::Project => "project",
+            Self::Lang => "lang",
+            Self::Lines => "lines",
+            Self::NoLsp => "no-lsp",
+            Self::NoTreeSitter => "no-tree-sitter",
+            Self::Log => "log",
+        }
+    }
+
+    const fn id(self) -> &'static str {
+        match self {
+            Self::CustomTheme => "custom_theme",
+            Self::NoLsp => "no_lsp",
+            Self::NoTreeSitter => "no_tree_sitter",
+            option => option.as_str(),
+        }
+    }
+
+    fn flag(self) -> String {
+        format!("--{}", self.as_str())
+    }
+}
 
 type Result<T> = std::result::Result<T, Error>;
 
@@ -24,35 +87,299 @@ struct CliInterface {
     file: Option<PathBuf>,
 
     /// Project directory exposed to the language server as its workspace.
-    #[arg(short, long, value_name = "DIR")]
+    #[arg(short, long = OptionName::Project.as_str(), value_name = "DIR")]
     project: Option<PathBuf>,
 
     /// Language name (e.g. "rust", "python").
     /// Inferred from file extension if a file path is provided.
-    #[arg(short, long)]
+    #[arg(short, long = OptionName::Lang.as_str())]
     lang: Option<String>,
 
     #[command(flatten)]
-    startup: lighter::server::StartupOptions,
+    startup: StartupArgs,
 
     /// Inclusive, one-based line range to output (start:end, :end, or start:).
-    #[arg(long, value_name = "RANGE")]
+    #[arg(long = OptionName::Lines.as_str(), value_name = "RANGE")]
     lines: Option<lighter::LineRange>,
 }
 
 #[derive(Debug, Subcommand)]
 enum CliCommand {
     /// Manage the background highlighting daemon.
+    #[command(name = CommandName::Daemon.as_str())]
     Daemon {
         #[command(subcommand)]
-        action: lighter::server::DaemonAction,
+        action: DaemonAction,
     },
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Subcommand)]
+enum DaemonAction {
+    /// Spawn the background daemon.
+    #[command(name = CommandName::Spawn.as_str())]
+    Spawn {
+        #[command(flatten)]
+        options: StartupArgs,
+    },
+    /// Kill the background daemon.
+    #[command(name = CommandName::Kill.as_str())]
+    Kill,
+    #[command(name = CommandName::Serve.as_str(), hide = true)]
+    Serve {
+        #[command(flatten)]
+        options: StartupArgs,
+    },
+}
+
+#[derive(Debug, Clone, Default, Eq, PartialEq, Args)]
+struct StartupArgs {
+    /// Path to a TOML config file.
+    #[arg(short, long = OptionName::Config.as_str())]
+    config: Option<PathBuf>,
+
+    /// Name of a built-in Arborium theme.
+    #[arg(
+        long = OptionName::Theme.as_str(),
+        conflicts_with = OptionName::CustomTheme.id(),
+        ignore_case = true,
+        value_parser = lighter::builtin_theme_parser()
+    )]
+    theme: Option<String>,
+
+    /// Path to a custom TOML theme file.
+    #[arg(
+        long = OptionName::CustomTheme.as_str(),
+        conflicts_with = OptionName::Theme.id()
+    )]
+    custom_theme: Option<PathBuf>,
+
+    /// Output highlighted ANSI, HTML, or LaTeX.
+    #[arg(short, long = OptionName::Format.as_str(), value_enum)]
+    format: Option<lighter::Output>,
+
+    /// Disable LSP semantic highlighting.
+    #[arg(long = OptionName::NoLsp.as_str())]
+    no_lsp: bool,
+
+    /// Disable tree-sitter syntax highlighting.
+    #[arg(long = OptionName::NoTreeSitter.as_str())]
+    no_tree_sitter: bool,
+
+    /// Set stderr logging verbosity.
+    #[arg(
+        long = OptionName::Log.as_str(),
+        value_enum,
+        ignore_case = true
+    )]
+    log: Option<logging::LogLevel>,
+}
+
+impl StartupArgs {
+    fn resolve_paths(mut self) -> Result<Self> {
+        self.config = canonicalize_path(self.config, |path, source| Error::ConfigRead {
+            path,
+            source,
+        })?;
+        self.custom_theme = canonicalize_path(self.custom_theme, |path, source| {
+            Error::ThemeRead { path, source }
+        })?;
+        Ok(self)
+    }
+}
+
+fn canonicalize_path(
+    path: Option<PathBuf>,
+    error: impl FnOnce(PathBuf, io::Error) -> Error,
+) -> Result<Option<PathBuf>> {
+    path.map(|path| fs::canonicalize(&path).map_err(|source| error(path, source)))
+        .transpose()
+}
+
+#[derive(Default, Deserialize)]
+struct RawConfig {
+    #[serde(default)]
+    theme: Option<ThemeConfig>,
+    #[serde(default)]
+    servers: HashMap<String, String>,
+    #[serde(default)]
+    captures: HashMap<String, CaptureMapping>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum CaptureMapping {
+    Capture(String),
+    Language(HashMap<String, String>),
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(untagged)]
+enum ThemeConfig {
+    Builtin(String),
+    Custom { path: PathBuf },
+}
+
+impl ThemeConfig {
+    fn resolve_relative_to(self, config_path: &Path) -> Self {
+        match self {
+            Self::Custom { path } if path.is_relative() => Self::Custom {
+                path: config_path
+                    .parent()
+                    .unwrap_or_else(|| Path::new("."))
+                    .join(path),
+            },
+            theme => theme,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct Config {
+    path: Option<PathBuf>,
+    commands: lighter::lsp::Commands,
+    general_mapping: lighter::lsp::CaptureMapping,
+    lang_mapping: lighter::lsp::LangCaptureMapping,
+    theme: arborium::theme::Theme,
+}
+
+impl Config {
+    fn load(options: &StartupArgs) -> Result<Self> {
+        let raw = options
+            .config
+            .as_deref()
+            .map(Self::read)
+            .transpose()?
+            .unwrap_or_default();
+        let RawConfig {
+            servers,
+            captures,
+            theme,
+        } = raw;
+        let configured_commands = servers
+            .into_iter()
+            .map(|(language, command)| {
+                let language = lighter::LangName::from(language);
+                let parts = shlex::split(&command).ok_or_else(|| Error::InvalidCommand {
+                    language: language.clone(),
+                    command,
+                })?;
+                let Some((program, args)) = parts.split_first() else {
+                    return Err(Error::EmptyCommand(language));
+                };
+                Ok((language, lighter::lsp::CommandEntry::new(program, args)))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let mut commands = lighter::lsp::default_commands();
+        commands.extend(configured_commands);
+        let mut general_mapping = lighter::lsp::CaptureMapping::with_capacity(captures.len());
+        let mut lang_mapping = lighter::lsp::LangCaptureMapping::with_capacity(captures.len());
+        captures
+            .into_iter()
+            .for_each(|(capture, mapping)| match mapping {
+                CaptureMapping::Capture(mapping) => {
+                    general_mapping.insert(capture, mapping);
+                }
+                CaptureMapping::Language(mapping) => {
+                    lang_mapping.insert(lighter::LangName::from(capture), mapping);
+                }
+            });
+        let theme = load_theme(
+            options.theme.as_deref(),
+            options.custom_theme.as_deref(),
+            theme.as_ref(),
+        )?;
+        Ok(Self {
+            path: options.config.clone(),
+            commands,
+            general_mapping,
+            lang_mapping,
+            theme,
+        })
+    }
+
+    fn read(path: &Path) -> Result<RawConfig> {
+        let text = fs::read_to_string(path).map_err(|source| Error::ConfigRead {
+            path: path.to_owned(),
+            source,
+        })?;
+        let mut raw =
+            toml::from_str::<RawConfig>(&text).map_err(|source| Error::InvalidConfig {
+                path: path.to_owned(),
+                source,
+            })?;
+        raw.theme = raw.theme.map(|theme| theme.resolve_relative_to(path));
+        Ok(raw)
+    }
+
+    fn daemon_options(&self, defaults: &StartupArgs) -> daemon::Options {
+        daemon::Options {
+            config: self.path.clone(),
+            commands: self.commands.clone(),
+            general_mapping: self.general_mapping.clone(),
+            lang_mapping: self.lang_mapping.clone(),
+            theme: self.theme.clone(),
+            format: defaults.format,
+            no_lsp: defaults.no_lsp,
+            no_tree_sitter: defaults.no_tree_sitter,
+            log: defaults.log.unwrap_or_default(),
+        }
+    }
+}
+
+fn load_theme(
+    builtin_theme: Option<&str>,
+    custom_path: Option<&Path>,
+    config_theme: Option<&ThemeConfig>,
+) -> Result<arborium::theme::Theme> {
+    fn custom(path: &Path) -> Result<arborium::theme::Theme> {
+        let text = fs::read_to_string(path).map_err(|source| Error::ThemeRead {
+            path: path.to_owned(),
+            source,
+        })?;
+        arborium::theme::Theme::from_toml(&text).map_err(|source| Error::InvalidTheme {
+            path: path.to_owned(),
+            source,
+        })
+    }
+
+    fn builtin(name: &str) -> Result<arborium::theme::Theme> {
+        arborium::theme::builtin::all()
+            .into_iter()
+            .find(|theme| theme.name.eq_ignore_ascii_case(name))
+            .ok_or_else(|| Error::UnknownBuiltinTheme(name.to_owned()))
+    }
+
+    match (builtin_theme, custom_path, config_theme) {
+        (Some(name), None, _) => builtin(name),
+        (None, Some(path), _) => custom(path),
+        (None, None, Some(ThemeConfig::Builtin(name))) => builtin(name),
+        (None, None, Some(ThemeConfig::Custom { path })) => custom(path),
+        (None, None, None) => Ok(arborium_theme::builtin::catppuccin_mocha()),
+        (Some(_), Some(_), _) => unreachable!("CLI rejects conflicting theme options"),
+    }
 }
 
 #[derive(Error, Debug)]
 enum Error {
     #[error(transparent)]
     Cli(#[from] clap::Error),
+    #[error("Invalid path {}", .0.display())]
+    InvalidPath(PathBuf),
+    #[error(
+        "Could not detect language from file name '{}'. Specify it with --lang flag.",
+        .0.display()
+    )]
+    UnknownLanguage(PathBuf),
+    #[error("Could not detect language. Specify it with --lang flag.")]
+    MissingLanguage,
+    #[error("Failed to read source file '{}'", .path.display())]
+    SourceRead {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("Failed to read stdin")]
+    StdinRead(#[source] io::Error),
     #[error("Failed to read config file '{}'", .path.display())]
     ConfigRead {
         path: PathBuf,
@@ -86,317 +413,65 @@ enum Error {
     },
     #[error("Unknown built-in theme '{0}'")]
     UnknownBuiltinTheme(String),
-    #[error("Invalid path {}", .0.display())]
-    InvalidPath(PathBuf),
-    #[error(
-        "Could not detect language from file name '{}'. Specify it with --lang flag.",
-        .0.display()
-    )]
-    UnknownLanguage(PathBuf),
-    #[error("Could not detect language. Specify it with --lang flag.")]
-    MissingLanguage,
-    #[error("Failed to read source file '{}'", .path.display())]
-    SourceRead {
-        path: PathBuf,
-        #[source]
-        source: io::Error,
-    },
-    #[error("Failed to read stdin")]
-    StdinRead(#[source] io::Error),
     #[error(transparent)]
-    Daemon(#[from] lighter::server::Error),
-    #[error(transparent)]
-    Lsp(#[from] lsp::Error),
+    Daemon(#[from] daemon::Error),
     #[error(transparent)]
     Highlight(#[from] lighter::Error),
-}
-
-/// Raw config maps directly to how the TOML is structured
-#[derive(serde::Deserialize)]
-struct RawConfig {
-    /// Theme to use, either by built-in name or by path to a TOML theme file.
-    #[serde(default)]
-    theme: Option<ThemeConfig>,
-    /// Mapping from language to server spawn command.
-    /// ```toml
-    /// [servers]
-    /// rust = "rust-analyzer --stdio"
-    /// ```
-    #[serde(default)]
-    servers: HashMap<String, String>,
-    /// Mapping from LSP captures to Tree-Sitter captures.
-    ///
-    /// Supports general and language-specific capture mapping.
-    /// ```toml
-    /// [captures]
-    /// decorator = "constant"
-    ///
-    /// [captures.rust]
-    /// const = "constant"
-    /// ```
-    #[serde(default)]
-    captures: HashMap<String, CaptureMapping>,
-}
-
-#[derive(Debug, serde::Deserialize)]
-#[serde(untagged)]
-enum CaptureMapping {
-    Capture(String),
-    Language(HashMap<String, String>),
-}
-
-#[derive(Clone, Debug, serde::Deserialize)]
-#[serde(untagged)]
-enum ThemeConfig {
-    Builtin(String),
-    Custom { path: PathBuf },
-}
-
-impl ThemeConfig {
-    fn resolve_relative_to(self, config_path: &Path) -> Self {
-        match self {
-            Self::Custom { path } if path.is_relative() => Self::Custom {
-                path: config_path
-                    .parent()
-                    .unwrap_or_else(|| Path::new("."))
-                    .join(path),
-            },
-            theme => theme,
-        }
-    }
-}
-
-/// A `RawConfig` parsed into runtime configuration.
-#[derive(Clone, Debug)]
-struct Config {
-    commands: lsp::Commands,
-    general_mapping: lsp::CaptureMapping,
-    lang_mapping: lsp::LangCaptureMapping,
-    theme: Option<ThemeConfig>,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            commands: lsp::default_commands(),
-            general_mapping: lsp::CaptureMapping::new(),
-            lang_mapping: lsp::LangCaptureMapping::new(),
-            theme: None,
-        }
-    }
-}
-
-impl Config {
-    /// A config without LSP server commands, thus no LSP can be started
-    fn no_lsp() -> Self {
-        Self {
-            commands: lsp::Commands::new(),
-            general_mapping: lsp::CaptureMapping::new(),
-            lang_mapping: lsp::LangCaptureMapping::new(),
-            theme: None,
-        }
-    }
-
-    fn without_lsp(mut self) -> Self {
-        self.commands.clear();
-        self
-    }
-
-    /// Read a config from file, parses `RawConfig` and converts it into `Config`
-    fn from_file(path: &Path) -> Result<Self> {
-        let text = fs::read_to_string(path).map_err(|source| Error::ConfigRead {
-            path: path.to_owned(),
-            source,
-        })?;
-        let config: RawConfig = toml::from_str(&text).map_err(|source| Error::InvalidConfig {
-            path: path.to_owned(),
-            source,
-        })?;
-
-        let RawConfig {
-            servers,
-            captures,
-            theme,
-        } = config;
-
-        // parse commands
-        let config_commands = servers
-            .into_iter()
-            .map(|(language, command)| {
-                let language = lighter::LangName::from(language);
-                let parts = shlex::split(&command).ok_or_else(|| Error::InvalidCommand {
-                    language: language.clone(),
-                    command,
-                })?;
-                let Some((program, args)) = parts.split_first() else {
-                    return Err(Error::EmptyCommand(language));
-                };
-
-                Ok((language, lsp::CommandEntry::new(program, args)))
-            })
-            .collect::<Result<Vec<_>>>()?;
-
-        let mut commands = lsp::default_commands();
-        commands.extend(config_commands);
-
-        let mut general_mapping = HashMap::with_capacity(captures.len());
-        let mut lang_mapping = HashMap::with_capacity(captures.len());
-        for (key, val) in captures.into_iter() {
-            match val {
-                CaptureMapping::Capture(mapping) => {
-                    general_mapping.insert(key, mapping);
-                }
-                CaptureMapping::Language(map) => {
-                    lang_mapping.insert(lighter::LangName::from(key), map);
-                }
-            }
-        }
-
-        Ok(Config {
-            commands,
-            general_mapping,
-            lang_mapping,
-            theme: theme.map(|theme| theme.resolve_relative_to(path)),
-        })
-    }
-
-    /// Load a config based on CLI arguments
-    fn load(no_lsp: bool, config_path: Option<&Path>) -> Result<Config> {
-        match (no_lsp, config_path) {
-            (true, None) => Ok(Config::no_lsp()),
-            (true, Some(path)) => Config::from_file(path).map(Config::without_lsp),
-            (false, None) => Ok(Config::default()),
-            (false, Some(path)) => Config::from_file(path),
-        }
-    }
 }
 
 #[derive(Debug)]
 struct CliOptions {
     file: Option<PathBuf>,
-    lang: lighter::LangName,
-    theme: arborium::theme::Theme,
-    config: Config,
+    language: lighter::LangName,
     project: Option<PathBuf>,
-    log: logging::LogLevel,
-    format: lighter::Output,
     lines: Option<lighter::LineRange>,
-    no_tree_sitter: bool,
-    no_lsp: bool,
-    request_format: Option<lighter::Output>,
-    config_path: Option<PathBuf>,
+    startup: StartupArgs,
+}
+
+impl CliOptions {
+    fn daemon_request(&self) -> daemon::RequestOptions {
+        daemon::RequestOptions {
+            project: self.project.clone(),
+            lines: self.lines,
+            no_tree_sitter: self.startup.no_tree_sitter,
+            no_lsp: self.startup.no_lsp,
+            format: self.startup.format,
+            config: self.startup.config.clone(),
+        }
+    }
 }
 
 impl TryFrom<CliInterface> for CliOptions {
     type Error = Error;
 
     fn try_from(cli: CliInterface) -> Result<Self> {
-        let lang = CliOptions::resolve_language(cli.lang.as_deref(), cli.file.as_deref())?;
-        let startup = resolve_startup_paths(cli.startup)?;
-        let config = Config::load(startup.no_lsp, startup.config.as_deref())?;
-        let theme = CliOptions::load_theme(
-            startup.theme.as_deref(),
-            startup.custom_theme.as_deref(),
-            config.theme.as_ref(),
-        )?;
-        let format = startup.format.unwrap_or_default();
-        let log = startup.log.unwrap_or_default();
-        let CliInterface {
-            file,
-            project,
-            lines,
-            ..
-        } = cli;
+        let language = resolve_language(cli.lang.as_deref(), cli.file.as_deref())?;
+        let startup = cli.startup.resolve_paths()?;
         Ok(Self {
-            file,
-            lang,
-            theme,
-            config,
-            project,
-            log,
-            format,
-            lines,
-            no_tree_sitter: startup.no_tree_sitter,
-            no_lsp: startup.no_lsp,
-            request_format: startup.format,
-            config_path: startup.config,
+            file: cli.file,
+            language,
+            project: cli.project,
+            lines: cli.lines,
+            startup,
         })
     }
 }
 
-fn resolve_startup_paths(
-    mut options: lighter::server::StartupOptions,
-) -> Result<lighter::server::StartupOptions> {
-    options.config = options
-        .config
-        .map(|path| fs::canonicalize(&path).map_err(|source| Error::ConfigRead { path, source }))
-        .transpose()?;
-    options.custom_theme = options
-        .custom_theme
-        .map(|path| fs::canonicalize(&path).map_err(|source| Error::ThemeRead { path, source }))
-        .transpose()?;
-    Ok(options)
-}
-
-impl CliOptions {
-    /// Load theme based on CLI arguments
-    fn load_theme(
-        builtin_theme: Option<&str>,
-        custom_path: Option<&Path>,
-        config_theme: Option<&ThemeConfig>,
-    ) -> Result<arborium::theme::Theme> {
-        /// Load custom theme from file
-        fn load_custom_theme(path: &Path) -> Result<arborium::theme::Theme> {
-            let text = fs::read_to_string(path).map_err(|source| Error::ThemeRead {
-                path: path.to_owned(),
-                source,
-            })?;
-            arborium::theme::Theme::from_toml(&text).map_err(|source| Error::InvalidTheme {
-                path: path.to_owned(),
-                source,
-            })
+fn resolve_language(lang: Option<&str>, file: Option<&Path>) -> Result<lighter::LangName> {
+    match (lang, file) {
+        (Some(lang), _) => Ok(lighter::LangName::from(lang)),
+        (None, Some(file)) => {
+            let path = file
+                .to_str()
+                .ok_or_else(|| Error::InvalidPath(file.to_owned()))?;
+            arborium::detect_language(path)
+                .map(lighter::LangName::from)
+                .ok_or_else(|| Error::UnknownLanguage(file.to_owned()))
         }
-
-        fn load_builtin_theme(name: &str) -> Result<arborium::theme::Theme> {
-            arborium::theme::builtin::all()
-                .into_iter()
-                .find(|theme| theme.name.eq_ignore_ascii_case(name))
-                .ok_or_else(|| Error::UnknownBuiltinTheme(name.to_owned()))
-        }
-
-        match (builtin_theme, custom_path, config_theme) {
-            (Some(name), None, _) => load_builtin_theme(name),
-            (None, Some(path), _) => load_custom_theme(path),
-            (None, None, Some(ThemeConfig::Builtin(name))) => load_builtin_theme(name),
-            (None, None, Some(ThemeConfig::Custom { path })) => load_custom_theme(path),
-            (None, None, None) => Ok(arborium_theme::builtin::catppuccin_mocha()),
-            (Some(_), Some(_), _) => unreachable!("clap rejects conflicting theme options"),
-        }
-    }
-
-    /// Detect language based on CLI arguments.
-    ///
-    /// Either from language argument or from file extension using arborium.
-    fn resolve_language(
-        lang_arg: Option<&str>,
-        file_arg: Option<&Path>,
-    ) -> Result<lighter::LangName> {
-        match (lang_arg, file_arg) {
-            (Some(lang), _) => Ok(lighter::LangName::from(lang)),
-            (None, Some(file_name)) => {
-                let path = file_name
-                    .to_str()
-                    .ok_or_else(|| Error::InvalidPath(file_name.to_owned()))?;
-                arborium::detect_language(path)
-                    .map(lighter::LangName::from)
-                    .ok_or_else(|| Error::UnknownLanguage(file_name.to_owned()))
-            }
-            (None, None) => Err(Error::MissingLanguage),
-        }
+        (None, None) => Err(Error::MissingLanguage),
     }
 }
 
-/// Read input source code: from a file path or from stdin.
 fn read_input(path: Option<&Path>) -> Result<String> {
     read_input_from(path, io::stdin())
 }
@@ -408,172 +483,120 @@ fn read_input_from(path: Option<&Path>, mut stdin: impl Read) -> Result<String> 
             source,
         }),
         None => {
-            let mut buf = String::new();
-            stdin.read_to_string(&mut buf).map_err(Error::StdinRead)?;
-            Ok(buf)
+            let mut source = String::new();
+            stdin
+                .read_to_string(&mut source)
+                .map_err(Error::StdinRead)?;
+            Ok(source)
         }
     }
 }
 
-fn create_highlighter(
-    config: Config,
-    project: Option<&Path>,
-    log: logging::LogLevel,
-    options: lighter::HighlightOptions,
-) -> Result<lighter::Highlighter> {
-    let registry = RefCell::new(lsp::ServerRegistry::new(
-        config.commands,
-        config.general_mapping,
-        config.lang_mapping,
-        project,
-        log,
-    )?);
-    Ok(lighter::Highlighter::with_options(registry, options, log))
+fn push_option(arguments: &mut Vec<OsString>, option: OptionName, value: &OsStr) {
+    arguments.extend([OsString::from(option.flag()), value.to_owned()]);
 }
 
-fn highlighter(options: &CliOptions) -> Result<lighter::Highlighter> {
-    create_highlighter(
-        options.config.clone(),
-        options.project.as_deref(),
-        options.log,
-        lighter::HighlightOptions {
-            output: options.format,
-            lsp: !options.no_lsp,
-            tree_sitter: !options.no_tree_sitter,
-            theme: options.theme.clone(),
-            lines: options.lines,
-        },
-    )
+fn daemon_serve_arguments(options: &StartupArgs) -> Vec<OsString> {
+    let mut arguments = vec![
+        CommandName::Daemon.as_str().into(),
+        CommandName::Serve.as_str().into(),
+    ];
+    if let Some(path) = &options.config {
+        push_option(&mut arguments, OptionName::Config, path.as_os_str());
+    }
+    if let Some(theme) = &options.theme {
+        push_option(&mut arguments, OptionName::Theme, OsStr::new(theme));
+    }
+    if let Some(path) = &options.custom_theme {
+        push_option(&mut arguments, OptionName::CustomTheme, path.as_os_str());
+    }
+    if let Some(format) = options.format {
+        let value = format.to_possible_value().expect("output has a value");
+        push_option(
+            &mut arguments,
+            OptionName::Format,
+            OsStr::new(value.get_name()),
+        );
+    }
+    if options.no_lsp {
+        arguments.push(OptionName::NoLsp.flag().into());
+    }
+    if options.no_tree_sitter {
+        arguments.push(OptionName::NoTreeSitter.flag().into());
+    }
+    if let Some(log) = options.log {
+        let value = log.to_possible_value().expect("log level has a value");
+        push_option(
+            &mut arguments,
+            OptionName::Log,
+            OsStr::new(value.get_name()),
+        );
+    }
+    arguments
 }
 
-fn run_once(options: &CliOptions, paths: &lighter::server::DaemonPaths) -> Result<()> {
+fn run_once(options: CliOptions) -> Result<()> {
     let source = read_input(options.file.as_deref())?;
-    let language = options.lang.as_ref();
-    let request_options = lighter::server::RequestOptions {
-        project: options.project.clone(),
-        lines: options.lines,
-        no_tree_sitter: options.no_tree_sitter,
-        no_lsp: options.no_lsp,
-        format: options.request_format,
-        config: options.config_path.clone(),
-    };
-    let output = match lighter::server::highlight(paths, language, &source, &request_options)? {
-        Some(output) => output,
-        None => highlighter(options)?.highlight(lighter::Input {
-            source: &source,
-            path: options.file.as_deref(),
-            lang: options.lang.clone(),
-        })?,
+    let output = match daemon::is_running() {
+        true => daemon::highlight(
+            options.language.as_ref(),
+            &source,
+            &options.daemon_request(),
+        )?,
+        false => highlight_once(&options, &source)?,
     };
     print!("{output}");
     Ok(())
 }
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-struct DaemonHighlighterKey {
-    project: Option<PathBuf>,
-}
-
-struct DaemonState {
-    startup: lighter::server::StartupOptions,
-    config_path: Option<PathBuf>,
-    config: Config,
-    theme: arborium::theme::Theme,
-    highlighters: HashMap<DaemonHighlighterKey, lighter::Highlighter>,
-}
-
-impl DaemonState {
-    fn new(startup: lighter::server::StartupOptions) -> Result<Self> {
-        let startup = resolve_startup_paths(startup)?;
-        let config = Config::load(false, startup.config.as_deref())?;
-        let theme = CliOptions::load_theme(
-            startup.theme.as_deref(),
-            startup.custom_theme.as_deref(),
-            config.theme.as_ref(),
-        )?;
-        Ok(Self {
-            config_path: startup.config.clone(),
-            startup,
-            config,
-            theme,
-            highlighters: HashMap::new(),
+fn highlight_once(options: &CliOptions, source: &str) -> Result<String> {
+    let config = Config::load(&options.startup)?;
+    let log = options.startup.log.unwrap_or_default();
+    let registry = lighter::lsp::ServerRegistry::new(
+        config.commands,
+        config.general_mapping,
+        config.lang_mapping,
+        options.project.as_deref(),
+        log,
+    )
+    .map_err(lighter::Error::from)?;
+    let highlighter = lighter::Highlighter::with_options(
+        RefCell::new(registry),
+        lighter::HighlightOptions {
+            output: options.startup.format.unwrap_or_default(),
+            lsp: !options.startup.no_lsp,
+            tree_sitter: !options.startup.no_tree_sitter,
+            theme: config.theme,
+            lines: options.lines,
+        },
+        log,
+    );
+    highlighter
+        .highlight(lighter::Input {
+            source,
+            path: options.file.as_deref(),
+            lang: options.language.clone(),
         })
-    }
-
-    fn highlight(
-        &mut self,
-        language: &str,
-        source: &str,
-        request: &lighter::server::RequestOptions,
-    ) -> Result<String> {
-        self.apply_config(request.config.as_deref())?;
-        let key = DaemonHighlighterKey {
-            project: request.project.clone(),
-        };
-        if let std::collections::hash_map::Entry::Vacant(entry) =
-            self.highlighters.entry(key.clone())
-        {
-            let log = self.startup.log.unwrap_or_default();
-            let highlighter = create_highlighter(
-                self.config.clone(),
-                key.project.as_deref(),
-                log,
-                lighter::HighlightOptions::default(),
-            )?;
-            entry.insert(highlighter);
-        }
-        let highlighter = self
-            .highlighters
-            .get_mut(&key)
-            .expect("highlighter was inserted");
-        highlighter.set_options(lighter::HighlightOptions {
-            output: request.format.or(self.startup.format).unwrap_or_default(),
-            lsp: !(self.startup.no_lsp || request.no_lsp),
-            tree_sitter: !(self.startup.no_tree_sitter || request.no_tree_sitter),
-            theme: self.theme.clone(),
-            lines: request.lines,
-        });
-        highlighter
-            .highlight(lighter::Input {
-                source,
-                path: None,
-                lang: lighter::LangName::from(language),
-            })
-            .map_err(Error::from)
-    }
-
-    fn apply_config(&mut self, path: Option<&Path>) -> Result<()> {
-        let Some(path) = path.filter(|path| Some(*path) != self.config_path.as_deref()) else {
-            return Ok(());
-        };
-        let config = Config::load(false, Some(path))?;
-        let theme = CliOptions::load_theme(
-            self.startup.theme.as_deref(),
-            self.startup.custom_theme.as_deref(),
-            config.theme.as_ref(),
-        )?;
-
-        self.highlighters.clear();
-        self.config_path = Some(path.to_owned());
-        self.config = config;
-        self.theme = theme;
-        Ok(())
-    }
+        .map_err(Error::from)
 }
 
-fn run_daemon(action: lighter::server::DaemonAction) -> Result<()> {
-    let paths = lighter::server::DaemonPaths::discover();
+fn run_daemon(action: DaemonAction) -> Result<()> {
     match action {
-        lighter::server::DaemonAction::Spawn { options } => {
-            let state = DaemonState::new(options)?;
-            lighter::server::spawn(&paths, &state.startup).map_err(Error::from)
+        DaemonAction::Spawn { options } => {
+            let options = options.resolve_paths()?;
+            Config::load(&options)?;
+            daemon::spawn(&daemon_serve_arguments(&options)).map_err(Error::from)
         }
-        lighter::server::DaemonAction::Kill => lighter::server::kill(&paths).map_err(Error::from),
-        lighter::server::DaemonAction::Serve { options } => {
-            lighter::server::detach();
-            let mut state = DaemonState::new(options)?;
-            lighter::server::serve(&paths, |language, source, request| {
-                state.highlight(language, source, request)
+        DaemonAction::Kill => daemon::kill().map_err(Error::from),
+        DaemonAction::Serve { options } => {
+            let options = options.resolve_paths()?;
+            let config = Config::load(&options)?;
+            let daemon_options = config.daemon_options(&options);
+            let defaults = options.clone();
+            daemon::serve(daemon_options, move |path| {
+                let mut options = defaults.clone();
+                options.config = Some(path.to_owned());
+                Config::load(&options).map(|config| config.daemon_options(&options))
             })
             .map_err(Error::from)
         }
@@ -582,650 +605,186 @@ fn run_daemon(action: lighter::server::DaemonAction) -> Result<()> {
 
 fn main() -> Result<()> {
     let cli = CliInterface::parse();
-    let paths = lighter::server::DaemonPaths::discover();
     match cli.command {
-        Some(CliCommand::Daemon { action }) => {
-            return run_daemon(action);
-        }
-        None => {}
+        Some(CliCommand::Daemon { action }) => run_daemon(action),
+        None => run_once(CliOptions::try_from(cli)?),
     }
-
-    let options = CliOptions::try_from(cli)?;
-    run_once(&options, &paths)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use quickcheck::{Arbitrary, Gen, TestResult};
     use std::assert_matches;
 
+    use super::*;
+
     const STUB_FILE: &str = "stub.py";
-    const CONFIG_FILE_NAME: &str = "config.toml";
-    const CUSTOM_THEME_NAME: &str = "Config custom theme";
-    const UNKNOWN_THEME_NAME: &str = "unknown-theme";
-    const DAEMON: &str = "daemon";
-    const SPAWN: &str = "spawn";
-    const KILL: &str = "kill";
-    const CUSTOM_THEME_BODY: &str = r##"
-variant = "light"
+    const CONFIG_FILE: &str = "config.toml";
 
-"keyword" = { fg = "accent" }
-
-[palette]
-accent = "#010203"
-"##;
-
-    enum CliArgs {
-        Config,
-        CustomTheme,
-        Format,
-        Lang,
-        Lines,
-        NoLsp,
-        NoTreeSitter,
-        Project,
-        Log,
-        Theme,
-    }
-
-    impl CliArgs {
-        fn as_str(&self) -> &'static str {
-            match self {
-                CliArgs::Config => "--config",
-                CliArgs::CustomTheme => "--custom-theme",
-                CliArgs::Format => "--format",
-                CliArgs::Lang => "--lang",
-                CliArgs::Lines => "--lines",
-                CliArgs::Log => "--log",
-                CliArgs::NoLsp => "--no-lsp",
-                CliArgs::NoTreeSitter => "--no-tree-sitter",
-                CliArgs::Project => "--project",
-                CliArgs::Theme => "--theme",
-            }
-        }
-    }
-
-    trait TestValues: Clone + 'static {
-        fn values() -> Vec<Self>;
-    }
-
-    #[derive(Clone, Debug)]
-    struct TestValue<T>(T);
-
-    impl<T> std::ops::Deref for TestValue<T> {
-        type Target = T;
-
-        fn deref(&self) -> &Self::Target {
-            &self.0
-        }
-    }
-
-    impl<T: TestValues> Arbitrary for TestValue<T> {
-        fn arbitrary(generator: &mut Gen) -> Self {
-            let values = T::values();
-            Self(generator.choose(&values).unwrap().clone())
-        }
-    }
-
-    impl TestValues for arborium::theme::Theme {
-        fn values() -> Vec<Self> {
-            builtin_themes()
-        }
-    }
-
-    impl TestValues for logging::LogLevel {
-        fn values() -> Vec<Self> {
-            <Self as clap::ValueEnum>::value_variants().to_vec()
-        }
-    }
-
-    impl TestValues for lighter::Output {
-        fn values() -> Vec<Self> {
-            <Self as clap::ValueEnum>::value_variants().to_vec()
-        }
-    }
-
-    type BuiltinTheme = TestValue<arborium::theme::Theme>;
-    type ArbitraryLogLevel = TestValue<logging::LogLevel>;
-    type ArbitraryOutput = TestValue<lighter::Output>;
-
-    fn builtin_themes() -> Vec<arborium::theme::Theme> {
-        arborium::theme::builtin::all()
-    }
-
-    fn is_builtin_theme(name: &str) -> bool {
-        builtin_themes()
-            .iter()
-            .any(|theme| theme.name.eq_ignore_ascii_case(name))
-    }
-
-    fn temp_file(suffix: &str, source: &str) -> tempfile::NamedTempFile {
-        let file = tempfile::Builder::new().suffix(suffix).tempfile().unwrap();
+    fn config_file(source: &str) -> tempfile::NamedTempFile {
+        let file = tempfile::Builder::new()
+            .suffix(CONFIG_FILE)
+            .tempfile()
+            .unwrap();
         fs::write(file.path(), source).unwrap();
         file
     }
 
-    fn missing_path(name: &str) -> PathBuf {
-        let dir = tempfile::tempdir().unwrap();
-        dir.path().join(name)
+    fn config_from_source(source: &str) -> Result<Config> {
+        let file = config_file(source);
+        Config::load(&StartupArgs {
+            config: Some(file.path().to_owned()),
+            ..Default::default()
+        })
     }
 
-    fn parse_cli<T: AsRef<std::ffi::OsStr>>(args: &[T]) -> Result<CliInterface> {
+    fn parse_cli<T: AsRef<OsStr>>(args: &[T]) -> Result<CliInterface> {
         CliInterface::try_parse_from(
-            std::iter::once(std::ffi::OsStr::new(BIN_NAME))
-                .chain(args.iter().map(|arg| arg.as_ref())),
+            std::iter::once(OsStr::new(BIN_NAME)).chain(args.iter().map(AsRef::as_ref)),
         )
         .map_err(Error::from)
     }
 
-    fn parse_options<T: AsRef<std::ffi::OsStr>>(args: &[T]) -> Result<CliOptions> {
+    fn parse_options<T: AsRef<OsStr>>(args: &[T]) -> Result<CliOptions> {
         CliOptions::try_from(parse_cli(args)?)
     }
 
-    fn path_value(path: &Path) -> &str {
-        path.to_str().unwrap()
-    }
+    #[test]
+    fn parses_one_time_options() {
+        let args = [
+            OsString::from(STUB_FILE),
+            OptionName::Project.flag().into(),
+            ".".into(),
+            OptionName::Lines.flag().into(),
+            "2:4".into(),
+            OptionName::Format.flag().into(),
+            "html".into(),
+            OptionName::NoLsp.flag().into(),
+            OptionName::Lang.flag().into(),
+            "python".into(),
+        ];
+        let options = parse_options(&args).unwrap();
 
-    fn parse_cli_value(argument: CliArgs, value: &str) -> Result<CliOptions> {
-        parse_options(&[STUB_FILE, argument.as_str(), value])
-    }
-
-    fn parse_builtin_theme(name: &str) -> Result<String> {
-        parse_cli_value(CliArgs::Theme, name).map(|options| options.theme.name)
-    }
-
-    fn builtin_theme_config(name: &str) -> String {
-        format!("theme = {name:?}\n")
-    }
-
-    fn custom_theme_config(path: &Path) -> String {
-        format!("theme = {{ path = {:?} }}\n", path_value(path))
-    }
-
-    fn custom_theme_source() -> String {
-        format!("name = {CUSTOM_THEME_NAME:?}\n{CUSTOM_THEME_BODY}")
-    }
-
-    quickcheck::quickcheck! {
-        fn accept_builtin_theme(theme: BuiltinTheme) -> bool {
-            parse_builtin_theme(&theme.name).is_ok_and(|name| theme.name == name)
-        }
-
-        fn accept_builtin_theme_case_insensitively(theme: BuiltinTheme) -> bool {
-            parse_builtin_theme(&theme.name.to_lowercase())
-                .is_ok_and(|name| theme.name == name)
-        }
-
-        fn reject_unknown_theme(name: String) -> TestResult {
-            match name.starts_with('-') || is_builtin_theme(&name) {
-                true => TestResult::discard(),
-                false => TestResult::from_bool(matches!(
-                    parse_builtin_theme(&name),
-                    Err(Error::Cli(error))
-                        if error.kind() == clap::error::ErrorKind::InvalidValue
-                )),
-            }
-        }
-
-        fn accept_log_level_case_insensitively(log_level: ArbitraryLogLevel) -> bool {
-            parse_cli_value(CliArgs::Log, &log_level.as_str().to_lowercase())
-                .is_ok_and(|options| options.log == *log_level)
-        }
-
-        fn accept_output_format(format: ArbitraryOutput) -> bool {
-            let value = clap::ValueEnum::to_possible_value(&*format).unwrap();
-            parse_cli_value(CliArgs::Format, value.get_name())
-                .is_ok_and(|options| options.format == *format)
-        }
+        assert_eq!(options.language.as_ref(), "python");
+        assert_eq!(options.project, Some(PathBuf::from(".")));
+        assert_eq!(options.lines, Some("2:4".parse().unwrap()));
+        assert_eq!(options.startup.format, Some(lighter::Output::Html));
+        assert!(options.startup.no_lsp);
     }
 
     #[test]
-    fn accept_project_directory() {
-        let dir = ".";
-        let options = parse_options(&[STUB_FILE, CliArgs::Project.as_str(), dir]).unwrap();
-
-        assert_eq!(options.project, Some(PathBuf::from(dir)));
-    }
-
-    #[test]
-    fn accept_explicit_language() {
-        let language = "rust";
-        let options = parse_cli_value(CliArgs::Lang, language).unwrap();
-
-        assert_eq!(options.lang.as_ref(), language);
-    }
-
-    #[test]
-    fn accept_only_dedicated_daemon_subcommands() {
-        const LANGUAGE: &str = "rust";
-
-        let spawn = parse_cli(&[DAEMON, SPAWN]).unwrap();
+    fn parses_only_dedicated_daemon_subcommands() {
         assert_matches!(
-            spawn.command,
+            parse_cli(&[
+                CommandName::Daemon.as_str(),
+                CommandName::Spawn.as_str(),
+            ])
+            .unwrap()
+            .command,
             Some(CliCommand::Daemon {
-                action: lighter::server::DaemonAction::Spawn { options }
-            }) if options == lighter::server::StartupOptions::default()
+                action: DaemonAction::Spawn { options }
+            }) if options == StartupArgs::default()
         );
-        let kill = parse_cli(&[DAEMON, KILL]).unwrap();
         assert_matches!(
-            kill.command,
+            parse_cli(&[CommandName::Daemon.as_str(), CommandName::Kill.as_str(),])
+                .unwrap()
+                .command,
             Some(CliCommand::Daemon {
-                action: lighter::server::DaemonAction::Kill
+                action: DaemonAction::Kill
             })
         );
-
-        [
-            vec![DAEMON, SPAWN, STUB_FILE],
-            vec![STUB_FILE, DAEMON, SPAWN],
-            vec![CliArgs::Lang.as_str(), LANGUAGE, DAEMON, SPAWN],
-            vec![DAEMON, SPAWN, CliArgs::Lang.as_str(), LANGUAGE],
-            vec![DAEMON, SPAWN, CliArgs::Project.as_str(), "."],
-            vec![DAEMON, SPAWN, CliArgs::Lines.as_str(), "1:2"],
-            vec!["--daemon", SPAWN],
-        ]
-        .into_iter()
-        .for_each(|args| assert!(parse_cli(&args).is_err()));
+        assert!(
+            parse_cli(&[
+                CommandName::Daemon.as_str(),
+                CommandName::Spawn.as_str(),
+                STUB_FILE,
+            ])
+            .is_err()
+        );
+        let invalid_daemon_option = format!("--{}", CommandName::Daemon.as_str());
+        assert!(
+            parse_cli(&[invalid_daemon_option.as_str(), CommandName::Spawn.as_str(),]).is_err()
+        );
     }
 
     #[test]
-    fn daemon_spawn_accepts_startup_options() {
-        let theme = builtin_themes().into_iter().next().unwrap();
-        let config = temp_file(CONFIG_FILE_NAME, "");
-        let args = [
-            DAEMON,
-            SPAWN,
-            CliArgs::Config.as_str(),
-            path_value(config.path()),
-            CliArgs::Theme.as_str(),
-            theme.name.as_str(),
-            CliArgs::Format.as_str(),
-            "html",
-            CliArgs::NoLsp.as_str(),
-            CliArgs::NoTreeSitter.as_str(),
-            CliArgs::Log.as_str(),
-            "debug",
+    fn parses_builtin_themes_case_insensitively() {
+        arborium::theme::builtin::all()
+            .into_iter()
+            .for_each(|theme| {
+                let name = theme.name.to_lowercase();
+                let args = [
+                    OsString::from(STUB_FILE),
+                    OptionName::Theme.flag().into(),
+                    name.clone().into(),
+                ];
+
+                let options = parse_options(&args).unwrap();
+
+                assert_eq!(options.startup.theme.as_deref(), Some(name.as_str()));
+            });
+    }
+
+    #[test]
+    fn rejects_unknown_theme_and_invalid_line_range() {
+        const UNKNOWN_THEME: &str = "unknown-theme";
+        let theme_args = [
+            OsString::from(STUB_FILE),
+            OptionName::Theme.flag().into(),
+            UNKNOWN_THEME.into(),
+        ];
+        let line_args = [
+            OsString::from(STUB_FILE),
+            OptionName::Lines.flag().into(),
+            "4:2".into(),
         ];
 
-        let cli = parse_cli(&args).unwrap();
-
-        assert_matches!(
-            cli.command,
-            Some(CliCommand::Daemon {
-                action: lighter::server::DaemonAction::Spawn { options }
-            }) if options.config.as_deref() == Some(config.path())
-                && options.theme.as_deref() == Some(theme.name.as_str())
-                && options.format == Some(lighter::Output::Html)
-                && options.no_lsp
-                && options.no_tree_sitter
-                && options.log == Some(logging::LogLevel::Debug)
-        );
+        [theme_args, line_args]
+            .into_iter()
+            .for_each(|args| assert_matches!(parse_options(&args), Err(Error::Cli(_))));
     }
 
     #[test]
-    fn daemon_spawn_accepts_custom_theme() {
-        let theme = temp_file(".toml", &custom_theme_source());
-
-        let cli = parse_cli(&[
-            DAEMON,
-            SPAWN,
-            CliArgs::CustomTheme.as_str(),
-            path_value(theme.path()),
-        ])
-        .unwrap();
-
-        assert_matches!(
-            cli.command,
-            Some(CliCommand::Daemon {
-                action: lighter::server::DaemonAction::Spawn { options }
-            }) if options.custom_theme.as_deref() == Some(theme.path())
-        );
-    }
-
-    #[test]
-    fn accept_line_range() {
-        let range = "2:4";
-        let options = parse_cli_value(CliArgs::Lines, range).unwrap();
-
-        assert_eq!(options.lines, Some(range.parse().unwrap()));
-    }
-
-    #[test]
-    fn reject_invalid_line_range() {
-        let error = parse_cli_value(CliArgs::Lines, "4:2").unwrap_err();
-
-        assert_matches!(
-            error,
-            Error::Cli(error) if error.kind() == clap::error::ErrorKind::ValueValidation
-        );
-    }
-
-    #[test]
-    fn accept_config() {
-        let cmd = lsp::CommandEntry {
-            command: "custom-server".to_string(),
-            args: vec!["--stdio".to_string(), "random arg".to_string()],
-        };
-        let server = "python";
-        let rust_mapping = ("const".to_string(), "constant".to_string());
-        let rust = lighter::LangName::from("rust");
-        let mapping = HashMap::from([(rust.clone(), HashMap::from([rust_mapping.clone()]))]);
-        let contents = format!(
-            r#"
-[servers]
-{server} = "{} {} '{}'"
-
-[captures.{rust}]
-{} = "{}"
-        "#,
-            cmd.command, cmd.args[0], cmd.args[1], rust_mapping.0, rust_mapping.1
-        );
-        let file = temp_file("config.toml", &contents);
-        let options = parse_cli_value(CliArgs::Config, path_value(file.path())).unwrap();
-        let parsed_command = options.config.commands.get(server).unwrap();
-
-        assert_eq!(&cmd, parsed_command);
-        assert_eq!(mapping, options.config.lang_mapping);
-        assert!(options.config_path.unwrap().is_absolute());
-    }
-
-    #[test]
-    fn config_change_replaces_daemon_highlighters() {
-        let initial = temp_file(CONFIG_FILE_NAME, "");
-        let replacement_theme = builtin_themes().into_iter().next().unwrap();
-        let replacement = temp_file(
-            CONFIG_FILE_NAME,
-            &builtin_theme_config(&replacement_theme.name),
-        );
-        let mut state = DaemonState::new(lighter::server::StartupOptions {
-            config: Some(initial.path().to_owned()),
-            ..Default::default()
-        })
-        .unwrap();
-        let key = DaemonHighlighterKey { project: None };
-        state
-            .highlighters
-            .insert(key, lighter::Highlighter::default());
-        let replacement = fs::canonicalize(replacement.path()).unwrap();
-
-        state.apply_config(Some(&replacement)).unwrap();
-
-        assert!(state.highlighters.is_empty());
-        assert_eq!(state.config_path.as_deref(), Some(replacement.as_path()));
-        assert_eq!(state.theme.name, replacement_theme.name);
-    }
-
-    #[test]
-    fn daemon_reuses_project_registry_across_dynamic_render_options() {
-        const SOURCE: &str = "first\nVec<Span>\n";
-        let mut state = DaemonState::new(lighter::server::StartupOptions {
+    fn serializes_daemon_startup_options() {
+        let theme = arborium::theme::builtin::all()
+            .into_iter()
+            .next()
+            .expect("at least one built-in theme");
+        let options = StartupArgs {
+            theme: Some(theme.name),
+            format: Some(lighter::Output::Html),
             no_lsp: true,
             no_tree_sitter: true,
-            ..Default::default()
-        })
-        .unwrap();
-        let first = lighter::server::RequestOptions {
-            lines: Some("1:1".parse().unwrap()),
-            ..Default::default()
-        };
-        let second = lighter::server::RequestOptions {
-            lines: Some("2:2".parse().unwrap()),
-            format: Some(lighter::Output::Html),
+            log: Some(logging::LogLevel::Debug),
             ..Default::default()
         };
 
-        let first_output = state.highlight("rust", SOURCE, &first).unwrap();
-        let second_output = state.highlight("rust", SOURCE, &second).unwrap();
-
-        assert_eq!(first_output, "first");
-        assert_eq!(second_output, "Vec&lt;Span&gt;");
-        assert_eq!(state.highlighters.len(), 1);
-    }
-
-    #[test]
-    fn read_config_with_general_capture_mapping_from_disk() {
-        let mapping = ("decorator".to_string(), "constant".to_string());
-        let contents = format!(
-            r#"
-[captures]
-{} = "{}"
-"#,
-            mapping.0, mapping.1
-        );
-        let file = temp_file("config.toml", &contents);
-
-        let config = Config::from_file(file.path()).unwrap();
-
-        assert_eq!(HashMap::from([mapping]), config.general_mapping);
-        assert!(config.lang_mapping.is_empty());
-    }
-
-    #[test]
-    fn accept_builtin_theme_from_config_case_insensitively() {
-        let expected = builtin_themes().into_iter().next().unwrap();
-        let file = temp_file(
-            CONFIG_FILE_NAME,
-            &builtin_theme_config(&expected.name.to_lowercase()),
-        );
-
-        let options = parse_cli_value(CliArgs::Config, path_value(file.path())).unwrap();
-
-        assert_eq!(options.theme.name, expected.name);
-    }
-
-    #[test]
-    fn accept_custom_theme_relative_to_config_with_lsp_disabled() {
-        const THEME_FILE_NAME: &str = "theme.toml";
-        let dir = tempfile::tempdir().unwrap();
-        let theme_path = dir.path().join(THEME_FILE_NAME);
-        fs::write(&theme_path, custom_theme_source()).unwrap();
-        let config_path = dir.path().join(CONFIG_FILE_NAME);
-        fs::write(
-            &config_path,
-            custom_theme_config(Path::new(THEME_FILE_NAME)),
+        let arguments = daemon_serve_arguments(&options);
+        let cli = CliInterface::try_parse_from(
+            std::iter::once(OsString::from(BIN_NAME)).chain(arguments),
         )
         .unwrap();
 
-        let options = parse_options(&[
-            STUB_FILE,
-            CliArgs::NoLsp.as_str(),
-            CliArgs::Config.as_str(),
-            path_value(&config_path),
-        ])
-        .unwrap();
-
-        assert_eq!(options.theme.name, CUSTOM_THEME_NAME);
-        assert!(options.config.commands.is_empty());
-    }
-
-    #[test]
-    fn command_line_theme_overrides_config_theme() {
-        let expected = builtin_themes().into_iter().next().unwrap();
-        let config = temp_file(CONFIG_FILE_NAME, &builtin_theme_config(UNKNOWN_THEME_NAME));
-
-        let options = parse_options(&[
-            STUB_FILE,
-            CliArgs::Config.as_str(),
-            path_value(config.path()),
-            CliArgs::Theme.as_str(),
-            &expected.name,
-        ])
-        .unwrap();
-
-        assert_eq!(options.theme.name, expected.name);
-    }
-
-    #[test]
-    fn reject_unknown_builtin_theme_from_config() {
-        let file = temp_file(CONFIG_FILE_NAME, &builtin_theme_config(UNKNOWN_THEME_NAME));
-
-        let error = parse_cli_value(CliArgs::Config, path_value(file.path())).unwrap_err();
-
-        assert_matches!(error, Error::UnknownBuiltinTheme(name) if name == UNKNOWN_THEME_NAME);
-    }
-
-    #[test]
-    fn reject_invalid_theme_config_shape() {
-        let file = temp_file(CONFIG_FILE_NAME, "theme = { name = \"invalid\" }");
-        let path = fs::canonicalize(file.path()).unwrap();
-
-        let error = parse_cli_value(CliArgs::Config, path_value(file.path())).unwrap_err();
-
-        assert_matches!(error, Error::InvalidConfig { path: error_path, .. } if error_path == path);
-    }
-
-    #[test]
-    fn accept_custom_theme_from_disk() {
-        let expected = arborium_theme::builtin::catppuccin_mocha();
-        let variant = match expected.is_dark {
-            true => "dark",
-            false => "light",
-        };
-        let source_url = expected.source_url.as_deref().unwrap();
-        let background = expected.background.unwrap().to_hex();
-        let foreground = expected.foreground.unwrap().to_hex();
-        let keyword_index =
-            arborium_theme::slot_to_highlight_index(arborium_theme::ThemeSlot::Keyword).unwrap();
-        let keyword = expected.style(keyword_index).unwrap();
-        let keyword_foreground = keyword.fg.unwrap().to_hex();
-
-        let contents = format!(
-            r##"
-name = "{}"
-variant = "{variant}"
-source = "{source_url}"
-background = "{background}"
-foreground = "{foreground}"
-
-"keyword" = {{ fg = "{keyword_foreground}" }}
-"##,
-            expected.name
-        );
-        let file = temp_file(".toml", &contents);
-
-        let options = parse_cli_value(CliArgs::CustomTheme, path_value(file.path())).unwrap();
-        let parsed_keyword = options.theme.style(keyword_index).unwrap();
-
-        assert_eq!(expected.name, options.theme.name);
-        assert_eq!(expected.is_dark, options.theme.is_dark);
-        assert_eq!(expected.source_url, options.theme.source_url);
-        assert_eq!(expected.background, options.theme.background);
-        assert_eq!(expected.foreground, options.theme.foreground);
-        assert_eq!(keyword.fg, parsed_keyword.fg);
-        assert_eq!(keyword.bg, parsed_keyword.bg);
-        assert_eq!(keyword.modifiers, parsed_keyword.modifiers);
-    }
-
-    #[test]
-    fn reject_empty_server_command() {
-        let file = temp_file(
-            ".toml",
-            r#"
-[servers]
-rust = " "
-"#,
-        );
-
-        let error = parse_cli_value(CliArgs::Config, path_value(file.path())).unwrap_err();
-
-        assert_matches!(error, Error::EmptyCommand(_));
-    }
-
-    #[test]
-    fn reject_unreadable_config() {
-        let path = missing_path("config.toml");
-
-        let error = parse_cli_value(CliArgs::Config, path_value(&path)).unwrap_err();
-
-        assert_matches!(error, Error::ConfigRead { path: error_path, .. } if error_path == path);
-    }
-
-    #[test]
-    fn reject_invalid_config() {
-        let file = temp_file(".toml", "=");
-        let path = fs::canonicalize(file.path()).unwrap();
-
-        let error = parse_cli_value(CliArgs::Config, path_value(file.path())).unwrap_err();
-
-        assert_matches!(error, Error::InvalidConfig { path: error_path, .. } if error_path == path);
-    }
-
-    #[test]
-    fn reject_invalid_server_command() {
-        let file = temp_file(
-            ".toml",
-            r#"
-[servers]
-rust = "'"
-"#,
-        );
-
-        let error = parse_cli_value(CliArgs::Config, path_value(file.path())).unwrap_err();
-
         assert_matches!(
-            error,
-            Error::InvalidCommand { language, command }
-                if language.as_ref() == "rust" && command == "'"
+            cli.command,
+            Some(CliCommand::Daemon {
+                action: DaemonAction::Serve { options: parsed }
+            }) if parsed == options
         );
     }
 
     #[test]
-    fn reject_unreadable_custom_theme() {
-        let path = missing_path("theme.toml");
-
-        let error = parse_cli_value(CliArgs::CustomTheme, path_value(&path)).unwrap_err();
-
-        assert_matches!(error, Error::ThemeRead { path: error_path, .. } if error_path == path);
+    fn rejects_missing_or_unknown_language() {
+        assert_matches!(parse_options::<&str>(&[]), Err(Error::MissingLanguage));
+        assert_matches!(
+            parse_options(&["unknown-language"]),
+            Err(Error::UnknownLanguage(path)) if path == Path::new("unknown-language")
+        );
     }
 
     #[test]
-    fn reject_invalid_custom_theme() {
-        let file = temp_file(".toml", "=");
-        let path = fs::canonicalize(file.path()).unwrap();
-
-        let error = parse_cli_value(CliArgs::CustomTheme, path_value(file.path())).unwrap_err();
-
-        assert_matches!(error, Error::InvalidTheme { path: error_path, .. } if error_path == path);
-    }
-
-    #[test]
-    fn reject_unknown_builtin_theme() {
-        let error = CliOptions::load_theme(Some(UNKNOWN_THEME_NAME), None, None).unwrap_err();
-
-        assert_matches!(error, Error::UnknownBuiltinTheme(name) if name == UNKNOWN_THEME_NAME);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn reject_non_utf8_file_path() {
-        use std::os::unix::ffi::OsStringExt;
-
-        let path = PathBuf::from(std::ffi::OsString::from_vec(vec![0xff]));
-
-        let error = parse_options(&[path.as_os_str()]).unwrap_err();
-
-        assert_matches!(error, Error::InvalidPath(error_path) if error_path == path);
-    }
-
-    #[test]
-    fn reject_file_with_unknown_language() {
-        let path = "unknown-language";
-
-        let error = parse_options(&[path]).unwrap_err();
-
-        assert_matches!(error, Error::UnknownLanguage(error_path) if error_path == Path::new(path));
-    }
-
-    #[test]
-    fn reject_missing_language() {
-        let error = parse_options::<&str>(&[]).unwrap_err();
-
-        assert_matches!(error, Error::MissingLanguage);
-    }
-
-    #[test]
-    fn reject_unreadable_source_file() {
-        let path = missing_path("source.rs");
+    fn rejects_unreadable_source() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("missing.rs");
 
         let error = read_input(Some(&path)).unwrap_err();
 
@@ -1235,15 +794,119 @@ rust = "'"
     struct FailingReader;
 
     impl Read for FailingReader {
-        fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+        fn read(&mut self, _buffer: &mut [u8]) -> io::Result<usize> {
             Err(io::ErrorKind::Other.into())
         }
     }
 
     #[test]
-    fn reject_unreadable_stdin() {
-        let error = read_input_from(None, FailingReader).unwrap_err();
+    fn rejects_unreadable_stdin() {
+        assert_matches!(
+            read_input_from(None, FailingReader),
+            Err(Error::StdinRead(_))
+        );
+    }
 
-        assert_matches!(error, Error::StdinRead(_));
+    #[test]
+    fn loads_commands_and_capture_mappings_from_config() {
+        const SERVER: &str = "custom-server";
+        const CAPTURE: &str = "decorator";
+        const MAPPING: &str = "constant";
+        let config = config_from_source(&format!(
+            r#"
+[servers]
+python = "{SERVER} --stdio 'multi word'"
+
+[captures]
+{CAPTURE} = "{MAPPING}"
+"#,
+        ))
+        .unwrap();
+        let command = config.commands.get("python").unwrap();
+
+        assert_eq!(command.command, SERVER);
+        assert_eq!(command.args, ["--stdio", "multi word"]);
+        assert_eq!(config.general_mapping.get(CAPTURE).unwrap(), MAPPING);
+    }
+
+    #[test]
+    fn resolves_custom_theme_relative_to_config() {
+        const THEME_FILE: &str = "theme.toml";
+        const THEME_NAME: &str = "Relative theme";
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(
+            directory.path().join(THEME_FILE),
+            format!(
+                r##"
+name = "{THEME_NAME}"
+variant = "dark"
+"keyword" = {{ fg = "accent" }}
+
+[palette]
+accent = "#010203"
+"##,
+            ),
+        )
+        .unwrap();
+        let config_path = directory.path().join(CONFIG_FILE);
+        fs::write(
+            &config_path,
+            format!("theme = {{ path = {THEME_FILE:?} }}\n"),
+        )
+        .unwrap();
+
+        let config = Config::load(&StartupArgs {
+            config: Some(config_path),
+            ..Default::default()
+        })
+        .unwrap();
+
+        assert_eq!(config.theme.name, THEME_NAME);
+    }
+
+    #[test]
+    fn command_line_theme_overrides_config_theme() {
+        const UNKNOWN_THEME: &str = "unknown-theme";
+        let expected = arborium::theme::builtin::all()
+            .into_iter()
+            .next()
+            .expect("at least one built-in theme");
+        let file = config_file(&format!("theme = {UNKNOWN_THEME:?}\n"));
+
+        let config = Config::load(&StartupArgs {
+            config: Some(file.path().to_owned()),
+            theme: Some(expected.name.clone()),
+            ..Default::default()
+        })
+        .unwrap();
+
+        assert_eq!(config.theme.name, expected.name);
+    }
+
+    #[test]
+    fn rejects_invalid_config_and_server_commands() {
+        let invalid_toml = config_from_source("=").unwrap_err();
+        let empty_command = config_from_source("[servers]\nrust = ' '").unwrap_err();
+        let invalid_command = config_from_source("[servers]\nrust = \"'\"").unwrap_err();
+
+        assert!(matches!(invalid_toml, Error::InvalidConfig { .. }));
+        assert!(matches!(empty_command, Error::EmptyCommand(_)));
+        assert!(matches!(invalid_command, Error::InvalidCommand { .. }));
+    }
+
+    #[test]
+    fn one_time_highlighting_builds_a_local_highlighter() {
+        let options = parse_options(&[
+            STUB_FILE,
+            OptionName::NoLsp.flag().as_str(),
+            OptionName::NoTreeSitter.flag().as_str(),
+            OptionName::Lines.flag().as_str(),
+            "1:1",
+        ])
+        .unwrap();
+
+        let output = highlight_once(&options, "first\nsecond\n").unwrap();
+
+        assert_eq!(output, "first");
     }
 }

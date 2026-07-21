@@ -36,20 +36,29 @@ stdout
 
 ### `main.rs`
 
-Argument parsing (clap, similar to arborium-cli). Reads input from file/stdin. Detects language from file extension or `--lang` flag.
+Owns the clap interface, reads input from file/stdin, and detects the language
+from the file extension or `--lang` flag. It also parses configuration and
+loads themes. Normal invocations check whether the daemon is running. If it is,
+`main` sends a daemon request; otherwise it creates a server registry and
+highlighter for that invocation and renders the result directly.
 
-The `daemon` subcommand is dispatched to `server.rs`. Its `spawn` action accepts
-the config, theme, custom-theme, format, no-LSP, no-tree-sitter, and logging
-options as daemon defaults. File, project, language, and line selection remain
-exclusive to normal file/stdin invocations.
+The `daemon` subcommand's `spawn` action accepts config, theme, custom-theme,
+format, no-LSP, no-tree-sitter, and logging options as daemon defaults. File,
+project, language, and line selection remain exclusive to normal file/stdin
+invocations.
 
-### `server.rs`
+### `daemon.rs`
 
 `lighter daemon spawn` launches a detached singleton process. While it is
 running, normal CLI invocations send their language and source to it over a Unix
 domain socket (or loopback IPC on Windows), allowing its LSP processes to remain
 alive between invocations. `lighter daemon kill` requests a clean shutdown.
-Without a live daemon, the CLI retains its standalone behavior.
+Without a live daemon, `main` creates the registry and highlighter directly.
+The daemon module owns daemon lifecycle and state, request options, runtime
+paths and locking, cached highlighters, and application of per-request options.
+It receives already-parsed configuration and theme data from `main`.
+
+### `daemon/protocol.rs`
 
 Daemon messages consist of a single-line JSON header followed by exactly the
 number of body bytes declared by `length`. Request headers contain `version`,
@@ -60,13 +69,11 @@ contain `error` and always have a zero length. A config override replaces the
 daemon's current config and drops its highlighter cache, cleanly shutting down
 the associated LSP registries before subsequent requests create replacements.
 
-Spawns LSP server processes based on which languages are encountered (main language + injection languages). Servers are started as child processes with piped stdio. Built-in table maps language names to commands (e.g. `rust` → `rust-analyzer`, `python` → `pylsp`).
-
-Calls into `lib.rs` for the highlight pipeline. Prints result.
-
 ### `lib.rs`
 
-The highlight pipeline. Takes source, language, and an `&mut LspClient` (or `Option` for no-LSP mode).
+The reusable highlighting engine. It owns the source-to-spans-to-output
+pipeline; configuration, daemon requests, and highlighter lifetime management
+remain with their callers.
 
 1. **Parse**: Use arborium's advanced API (`CompiledGrammar`, `ParseContext`) to parse source → `ParseResult`.
 2. **Recurse injections**: For each `Injection` in the result, parse the injected content with arborium for that language. Offset-adjust resulting spans back to the parent coordinate space. Collect recursively.
