@@ -4,6 +4,7 @@ use clap::Parser;
 use lighter::daemon;
 use std::io;
 use std::path::PathBuf;
+use std::process::ExitCode;
 use std::rc::Rc;
 use thiserror::Error;
 
@@ -153,11 +154,25 @@ fn run_once(options: cli::Options) -> Result<()> {
     Ok(())
 }
 
-fn main() -> Result<()> {
+fn run() -> Result<()> {
     let cli = cli::Interface::parse();
     match cli.command {
         Some(cli::Command::Daemon { action }) => run_daemon(action),
         None => run_once(cli::Options::try_from(cli)?),
+    }
+}
+
+fn write_error(mut output: impl io::Write, error: &Error) -> io::Result<()> {
+    writeln!(output, "{error}")
+}
+
+fn main() -> ExitCode {
+    match run() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            let _ = write_error(io::stderr().lock(), &error);
+            ExitCode::FAILURE
+        }
     }
 }
 
@@ -194,5 +209,15 @@ mod tests {
         let output = highlight_once(&options, "first\nsecond\n").unwrap();
 
         assert_eq!(output, "first");
+    }
+
+    #[test]
+    fn errors_are_rendered_as_text() {
+        let error = Error::MissingLanguage;
+        let mut output = Vec::new();
+
+        write_error(&mut output, &error).unwrap();
+
+        assert_eq!(String::from_utf8(output).unwrap(), format!("{error}\n"));
     }
 }
