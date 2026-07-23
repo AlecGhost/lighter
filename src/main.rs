@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 
 use clap::Parser;
-use lighter::daemon;
+use lighter::{config, daemon, theme};
 use std::io;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -9,7 +9,6 @@ use std::rc::Rc;
 use thiserror::Error;
 
 mod cli;
-mod config;
 
 type Result<T> = std::result::Result<T, Error>;
 
@@ -34,50 +33,28 @@ pub enum Error {
     },
     #[error("Failed to read stdin")]
     StdinRead(#[source] io::Error),
-    #[error("Failed to read config file '{}'", .path.display())]
-    ConfigRead {
-        path: PathBuf,
-        #[source]
-        source: io::Error,
-    },
-    #[error("Invalid toml in config file '{}'", .path.display())]
-    InvalidConfig {
-        path: PathBuf,
-        #[source]
-        source: toml::de::Error,
-    },
-    #[error("Invalid command string for language '{language}': {command}")]
-    InvalidCommand {
-        language: lighter::LangName,
-        command: String,
-    },
-    #[error("Empty command string for language '{0}'")]
-    EmptyCommand(lighter::LangName),
-    #[error("Failed to read theme file '{}'", .path.display())]
-    ThemeRead {
-        path: PathBuf,
-        #[source]
-        source: io::Error,
-    },
-    #[error("Invalid theme file '{}'", .path.display())]
-    InvalidTheme {
-        path: PathBuf,
-        #[source]
-        source: arborium_theme::ThemeError,
-    },
-    #[error("Unknown built-in theme '{0}'")]
-    UnknownBuiltinTheme(String),
+    #[error(transparent)]
+    Config(#[from] config::Error),
+    #[error(transparent)]
+    Theme(#[from] theme::Error),
     #[error(transparent)]
     Daemon(#[from] daemon::Error),
     #[error(transparent)]
     Highlight(#[from] lighter::Error),
 }
 
-fn highlight_once(options: &cli::Options, source: &str) -> Result<String> {
-    let config = config::Config::load(options.startup.config.as_deref())?.override_theme(
-        options.startup.theme.as_deref(),
-        options.startup.custom_theme.as_deref(),
+fn load_startup(options: &cli::StartupArgs) -> Result<(config::Config, arborium::theme::Theme)> {
+    let config = config::Config::load(options.config.as_deref())?;
+    let theme = theme::load(
+        options.theme.as_deref(),
+        options.custom_theme.as_deref(),
+        config.theme.as_ref(),
     )?;
+    Ok((config, theme))
+}
+
+fn highlight_once(options: &cli::Options, source: &str) -> Result<String> {
+    let (config, theme) = load_startup(&options.startup)?;
     let log = options.startup.log.unwrap_or_default();
     let registry = lighter::lsp::ServerRegistry::new(
         config.commands,
@@ -92,7 +69,7 @@ fn highlight_once(options: &cli::Options, source: &str) -> Result<String> {
             output: options.startup.format.unwrap_or_default(),
             lsp: !options.no_lsp,
             tree_sitter: !options.no_tree_sitter,
-            theme: config.theme,
+            theme,
             lines: options.lines,
         },
         log,
@@ -111,18 +88,17 @@ fn run_daemon(action: cli::DaemonAction) -> Result<()> {
     match action {
         cli::DaemonAction::Spawn { options } => {
             // load in order to fail fast
-            let _config = config::Config::load(options.config.as_deref())?;
+            let _startup = load_startup(&options)?;
             daemon::spawn(&cli::daemon_serve_arguments(&options)).map_err(Error::from)
         }
         cli::DaemonAction::Kill => daemon::kill().map_err(Error::from),
         cli::DaemonAction::Serve { options } => {
-            let config = config::Config::load(options.config.as_deref())?
-                .override_theme(options.theme.as_deref(), options.custom_theme.as_deref())?;
+            let (config, theme) = load_startup(&options)?;
             let initial_options = daemon::Options {
                 commands: config.commands.clone(),
                 general_mapping: config.general_mapping.clone(),
                 lang_mapping: config.lang_mapping.clone(),
-                theme: config.theme.clone(),
+                theme,
                 format: options.format.unwrap_or_default(),
                 log: options.log.unwrap_or_default(),
             };

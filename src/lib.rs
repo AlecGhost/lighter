@@ -10,10 +10,12 @@ use arborium::theme::Theme;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub mod config;
 pub mod daemon;
 mod latex;
 pub mod logging;
 pub mod lsp;
+pub mod theme;
 
 const TREE_SITTER_SPANS_HEADING: &str = "Tree-sitter spans:";
 const LSP_SPANS_HEADING: &str = "LSP spans:";
@@ -85,7 +87,6 @@ pub enum Output {
     Latex,
 }
 
-
 #[derive(Debug)]
 pub struct HighlightOptions {
     pub output: Output,
@@ -100,7 +101,7 @@ impl Default for HighlightOptions {
         Self {
             output: Output::Ansi,
             lsp: true,
-            theme: arborium_theme::builtin::catppuccin_mocha(),
+            theme: theme::default(),
             tree_sitter: true,
             lines: None,
         }

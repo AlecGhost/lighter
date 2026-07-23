@@ -113,7 +113,7 @@ fn write_request(
             length: input.source.len(),
             path: input.path.map(PathBuf::from),
             project: input.project.map(PathBuf::from),
-            options: options,
+            options,
         },
     )?;
     output.write_all(input.source.as_bytes())?;

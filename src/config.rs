@@ -1,15 +1,39 @@
 use std::collections::HashMap;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
+use thiserror::Error;
 
-use super::{Error, Result};
+use crate::{LangName, lsp, theme};
+
+#[derive(Debug, Error)]
+pub enum Error {
+    #[error("Failed to read config file '{}'", .path.display())]
+    Read {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("Invalid toml in config file '{}'", .path.display())]
+    Invalid {
+        path: PathBuf,
+        #[source]
+        source: toml::de::Error,
+    },
+    #[error("Invalid command string for language '{language}': {command}")]
+    InvalidCommand { language: LangName, command: String },
+    #[error("Empty command string for language '{0}'")]
+    EmptyCommand(LangName),
+}
+
+type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Default, Deserialize)]
 struct RawConfig {
     #[serde(default)]
-    theme: Option<ThemeConfig>,
+    theme: Option<theme::Config>,
     #[serde(default)]
     servers: HashMap<String, String>,
     #[serde(default)]
@@ -23,42 +47,17 @@ enum CaptureMapping {
     Language(HashMap<String, String>),
 }
 
-#[derive(Clone, Debug, Deserialize)]
-#[serde(untagged)]
-enum ThemeConfig {
-    Builtin(String),
-    Custom { path: PathBuf },
-}
-
-impl ThemeConfig {
-    fn resolve_relative_to(self, config_path: &Path) -> Self {
-        match self {
-            Self::Custom { path } if path.is_relative() => Self::Custom {
-                path: config_path
-                    .parent()
-                    .unwrap_or_else(|| Path::new("."))
-                    .join(path),
-            },
-            theme => theme,
-        }
-    }
-}
-
 #[derive(Clone, Debug)]
 pub struct Config {
-    pub commands: lighter::lsp::Commands,
-    pub general_mapping: lighter::lsp::CaptureMapping,
-    pub lang_mapping: lighter::lsp::LangCaptureMapping,
-    pub theme: arborium::theme::Theme,
+    pub commands: lsp::Commands,
+    pub general_mapping: lsp::CaptureMapping,
+    pub lang_mapping: lsp::LangCaptureMapping,
+    pub theme: Option<theme::Config>,
 }
 
 impl Config {
     pub fn load(config_path: Option<&Path>) -> Result<Self> {
-        let raw = config_path
-            .as_deref()
-            .map(Self::read)
-            .transpose()?
-            .unwrap_or_default();
+        let raw = config_path.map(Self::read).transpose()?.unwrap_or_default();
         let RawConfig {
             servers,
             captures,
@@ -67,7 +66,7 @@ impl Config {
         let configured_commands = servers
             .into_iter()
             .map(|(language, command)| {
-                let language = lighter::LangName::from(language);
+                let language = LangName::from(language);
                 let parts = shlex::split(&command).ok_or_else(|| Error::InvalidCommand {
                     language: language.clone(),
                     command,
@@ -77,14 +76,14 @@ impl Config {
                 };
                 Ok((
                     language,
-                    lighter::lsp::CommandEntry::new(program, args, serde_json::json!({})),
+                    lsp::CommandEntry::new(program, args, serde_json::json!({})),
                 ))
             })
             .collect::<Result<Vec<_>>>()?;
-        let mut commands = lighter::lsp::default_commands();
+        let mut commands = lsp::default_commands();
         commands.extend(configured_commands);
-        let mut general_mapping = lighter::lsp::CaptureMapping::with_capacity(captures.len());
-        let mut lang_mapping = lighter::lsp::LangCaptureMapping::with_capacity(captures.len());
+        let mut general_mapping = lsp::CaptureMapping::with_capacity(captures.len());
+        let mut lang_mapping = lsp::LangCaptureMapping::with_capacity(captures.len());
         captures
             .into_iter()
             .for_each(|(capture, mapping)| match mapping {
@@ -92,83 +91,28 @@ impl Config {
                     general_mapping.insert(capture, mapping);
                 }
                 CaptureMapping::Language(mapping) => {
-                    lang_mapping.insert(lighter::LangName::from(capture), mapping);
+                    lang_mapping.insert(LangName::from(capture), mapping);
                 }
             });
-        let theme = config_theme
-            .as_ref()
-            .map(|theme_config| match theme_config {
-                ThemeConfig::Builtin(name) => theme::load_builtin(name),
-                ThemeConfig::Custom { path } => theme::load_custom(path),
-            })
-            .transpose()?
-            .unwrap_or_else(|| theme::default());
         Ok(Self {
             commands,
             general_mapping,
             lang_mapping,
-            theme,
+            theme: config_theme,
         })
     }
 
     fn read(path: &Path) -> Result<RawConfig> {
-        let text = fs::read_to_string(path).map_err(|source| Error::ConfigRead {
+        let text = fs::read_to_string(path).map_err(|source| Error::Read {
             path: path.to_owned(),
             source,
         })?;
-        let mut raw =
-            toml::from_str::<RawConfig>(&text).map_err(|source| Error::InvalidConfig {
-                path: path.to_owned(),
-                source,
-            })?;
+        let mut raw = toml::from_str::<RawConfig>(&text).map_err(|source| Error::Invalid {
+            path: path.to_owned(),
+            source,
+        })?;
         raw.theme = raw.theme.map(|theme| theme.resolve_relative_to(path));
         Ok(raw)
-    }
-
-    pub fn override_theme(self, builtin: Option<&str>, custom: Option<&Path>) -> Result<Self> {
-        let theme = theme::resolve(builtin, custom, self.theme)?;
-        Ok(Self { theme, ..self })
-    }
-}
-
-mod theme {
-    use super::{Error, Result};
-    use std::fs;
-    use std::path::Path;
-
-    pub fn load_custom(path: &Path) -> Result<arborium::theme::Theme> {
-        let text = fs::read_to_string(path).map_err(|source| Error::ThemeRead {
-            path: path.to_owned(),
-            source,
-        })?;
-        arborium::theme::Theme::from_toml(&text).map_err(|source| Error::InvalidTheme {
-            path: path.to_owned(),
-            source,
-        })
-    }
-
-    pub fn load_builtin(name: &str) -> Result<arborium::theme::Theme> {
-        arborium::theme::builtin::all()
-            .into_iter()
-            .find(|theme| theme.name.eq_ignore_ascii_case(name))
-            .ok_or_else(|| Error::UnknownBuiltinTheme(name.to_owned()))
-    }
-
-    pub fn default() -> arborium::theme::Theme {
-        arborium_theme::builtin::catppuccin_mocha()
-    }
-
-    pub fn resolve(
-        builtin_theme: Option<&str>,
-        custom_path: Option<&Path>,
-        config_theme: arborium::theme::Theme,
-    ) -> Result<arborium::theme::Theme> {
-        match (builtin_theme, custom_path) {
-            (Some(name), None) => load_builtin(name),
-            (None, Some(path)) => load_custom(path),
-            (None, None) => Ok(config_theme),
-            (Some(_), Some(_)) => unreachable!("CLI rejects conflicting theme options"),
-        }
     }
 }
 
@@ -241,8 +185,9 @@ mod tests {
         .unwrap();
 
         let config = Config::load(Some(&config_path)).unwrap();
+        let theme = theme::load(None, None, config.theme.as_ref()).unwrap();
 
-        assert_eq!(config.theme.name, THEME_NAME);
+        assert_eq!(theme.name, THEME_NAME);
     }
 
     #[test]
@@ -251,7 +196,7 @@ mod tests {
         let empty_command = config_from_source("[servers]\nrust = ' '").unwrap_err();
         let invalid_command = config_from_source("[servers]\nrust = \"'\"").unwrap_err();
 
-        assert!(matches!(invalid_toml, Error::InvalidConfig { .. }));
+        assert!(matches!(invalid_toml, Error::Invalid { .. }));
         assert!(matches!(empty_command, Error::EmptyCommand(_)));
         assert!(matches!(invalid_command, Error::InvalidCommand { .. }));
     }
