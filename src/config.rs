@@ -46,7 +46,6 @@ impl ThemeConfig {
 
 #[derive(Clone, Debug)]
 pub struct Config {
-    pub path: Option<PathBuf>,
     pub commands: lighter::lsp::Commands,
     pub general_mapping: lighter::lsp::CaptureMapping,
     pub lang_mapping: lighter::lsp::LangCaptureMapping,
@@ -102,7 +101,6 @@ impl Config {
             .transpose()?
             .unwrap_or_else(|| theme::default());
         Ok(Self {
-            path: config_path.map(Path::to_path_buf),
             commands,
             general_mapping,
             lang_mapping,
@@ -175,7 +173,6 @@ mod theme {
 mod tests {
     use super::*;
 
-    const STUB_FILE: &str = "stub.py";
     const CONFIG_FILE: &str = "config.toml";
 
     fn config_file(source: &str) -> tempfile::NamedTempFile {

@@ -4,6 +4,7 @@ use clap::Parser;
 use lighter::daemon;
 use std::io;
 use std::path::PathBuf;
+use std::rc::Rc;
 use thiserror::Error;
 
 mod cli;
@@ -81,18 +82,18 @@ fn highlight_once(options: &cli::Options, source: &str) -> Result<String> {
         config.commands,
         config.general_mapping,
         config.lang_mapping,
-        options.project.as_deref(),
         log,
-    )
-    .map_err(lighter::Error::from)?;
+    );
+    let registry = Rc::new(RefCell::new(registry));
     let highlighter = lighter::Highlighter::with_options(
-        RefCell::new(registry),
+        registry,
         lighter::HighlightOptions {
             output: options.startup.format.unwrap_or_default(),
             lsp: !options.no_lsp,
             tree_sitter: !options.no_tree_sitter,
             theme: config.theme,
             lines: options.lines,
+            project: options.project.clone(),
         },
         log,
     );

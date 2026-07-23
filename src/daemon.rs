@@ -1,10 +1,10 @@
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{self, Command, Stdio};
+use std::rc::Rc;
 use std::thread;
 use std::time::Duration;
 
@@ -105,21 +105,26 @@ fn is_false(value: &bool) -> bool {
     !value
 }
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-struct HighlighterKey {
-    project: Option<PathBuf>,
-}
-
 struct Session {
-    options: Options,
-    highlighters: HashMap<HighlighterKey, Highlighter>,
+    theme: Theme,
+    format: Output,
+    log: logging::LogLevel,
+    registry: Rc<RefCell<lsp::ServerRegistry>>,
 }
 
 impl Session {
     fn new(options: Options) -> Self {
+        let registry = lsp::ServerRegistry::new(
+            options.commands,
+            options.general_mapping,
+            options.lang_mapping,
+            options.log,
+        );
         Self {
-            options,
-            highlighters: HashMap::new(),
+            theme: options.theme,
+            format: options.format,
+            log: options.log,
+            registry: Rc::new(RefCell::new(registry)),
         }
     }
 
@@ -129,46 +134,24 @@ impl Session {
         source: &str,
         request: &RequestOptions,
     ) -> Result<String> {
-        let key = HighlighterKey {
-            project: request.project.clone(),
-        };
-        if let std::collections::hash_map::Entry::Vacant(entry) =
-            self.highlighters.entry(key.clone())
-        {
-            let registry = RefCell::new(
-                lsp::ServerRegistry::new(
-                    self.options.commands.clone(),
-                    self.options.general_mapping.clone(),
-                    self.options.lang_mapping.clone(),
-                    key.project.as_deref(),
-                    self.options.log,
-                )
-                .map_err(crate::Error::from)?,
-            );
-            entry.insert(Highlighter::with_options(
-                registry,
-                HighlightOptions::default(),
-                self.options.log,
-            ));
-        }
-        let highlighter = self
-            .highlighters
-            .get_mut(&key)
-            .expect("highlighter was inserted");
-        highlighter.set_options(HighlightOptions {
-            output: request.format.unwrap_or(self.options.format),
-            lsp: !request.no_lsp,
-            tree_sitter: !request.no_tree_sitter,
-            theme: self.options.theme.clone(),
-            lines: request.lines,
-        });
-        highlighter
-            .highlight(Input {
-                source,
-                path: None,
-                lang: LangName::from(language),
-            })
-            .map_err(Error::from)
+        Highlighter::with_options(
+            Rc::clone(&self.registry),
+            HighlightOptions {
+                output: request.format.unwrap_or(self.format),
+                lsp: !request.no_lsp,
+                tree_sitter: !request.no_tree_sitter,
+                theme: self.theme.clone(),
+                lines: request.lines,
+                project: request.project.clone(),
+            },
+            self.log,
+        )
+        .highlight(Input {
+            source,
+            path: None,
+            lang: LangName::from(language),
+        })
+        .map_err(Error::from)
     }
 }
 
@@ -417,8 +400,6 @@ pub fn spawn(arguments: &[OsString]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::convert::Infallible;
-
     use super::*;
 
     const LANGUAGE: &str = "rust";
@@ -435,10 +416,6 @@ mod tests {
         }
     }
 
-    fn no_config(_: &Path) -> std::result::Result<Options, Infallible> {
-        unreachable!("test does not request a different config")
-    }
-
     #[test]
     fn lock_allows_only_one_daemon() {
         let directory = tempfile::tempdir().unwrap();
@@ -452,27 +429,27 @@ mod tests {
     }
 
     #[test]
-    fn session_reuses_project_highlighter_across_render_options() {
+    fn session_applies_request_options_to_each_highlight() {
         let mut session = Session::new(options());
+        let request = RequestOptions {
+            no_lsp: true,
+            no_tree_sitter: true,
+            ..Default::default()
+        };
         let first = RequestOptions {
             lines: Some("1:1".parse().unwrap()),
-            ..Default::default()
+            ..request.clone()
         };
         let second = RequestOptions {
             lines: Some("2:2".parse().unwrap()),
             format: Some(Output::Html),
-            ..Default::default()
+            ..request
         };
 
-        let first_output = session
-            .highlight(LANGUAGE, SOURCE, &first)
-            .unwrap();
-        let second_output = session
-            .highlight(LANGUAGE, SOURCE, &second)
-            .unwrap();
+        let first_output = session.highlight(LANGUAGE, SOURCE, &first).unwrap();
+        let second_output = session.highlight(LANGUAGE, SOURCE, &second).unwrap();
 
         assert_eq!(first_output, "first");
         assert_eq!(second_output, "Vec&lt;Span&gt;");
-        assert_eq!(session.highlighters.len(), 1);
     }
 }

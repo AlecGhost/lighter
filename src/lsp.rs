@@ -132,12 +132,29 @@ pub fn default_commands() -> Commands {
 
 #[derive(Debug)]
 pub struct ServerRegistry {
-    clients: HashMap<LangName, Client>,
+    clients: HashMap<ServerKey, Client>,
     commands: Commands,
     general_mapping: CaptureMapping,
     lang_mapping: LangCaptureMapping,
-    project: Option<Project>,
     log: LogLevel,
+}
+
+#[derive(Debug, Clone, Eq, Hash, PartialEq)]
+struct ServerKey {
+    language: LangName,
+    project: Option<PathBuf>,
+}
+
+impl ServerKey {
+    fn new(language: LangName, project: Option<&Project>) -> Self {
+        Self {
+            language,
+            project: project.map(|project| {
+                assert!(project.path.is_absolute());
+                project.path.clone()
+            }),
+        }
+    }
 }
 
 impl Default for ServerRegistry {
@@ -147,7 +164,6 @@ impl Default for ServerRegistry {
             clients: HashMap::new(),
             general_mapping: HashMap::new(),
             lang_mapping: HashMap::new(),
-            project: None,
             log: LogLevel::default(),
         }
     }
@@ -158,36 +174,31 @@ impl ServerRegistry {
         commands: Commands,
         general_mapping: CaptureMapping,
         lang_mapping: LangCaptureMapping,
-        project: Option<&Path>,
         log: LogLevel,
-    ) -> Result<Self> {
-        Ok(Self {
+    ) -> Self {
+        Self {
             commands,
             general_mapping,
             lang_mapping,
-            project: project.map(Project::new).transpose()?,
             log,
             clients: HashMap::new(),
-        })
+        }
     }
 
-    pub fn get_server(&mut self, lang: LangName) -> Result<Server<'_>> {
-        let client = match self.clients.entry(lang.clone()) {
+    pub fn get_server(&mut self, language: LangName, project: Option<&Path>) -> Result<Server<'_>> {
+        let project = project.map(Project::new).transpose()?;
+        let key = ServerKey::new(language.clone(), project.as_ref());
+        let client = match self.clients.entry(key) {
             std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
             std::collections::hash_map::Entry::Vacant(entry) => {
                 let command = self
                     .commands
-                    .get(&lang)
-                    .ok_or_else(|| Error::NoServer(lang.clone()))?;
-                entry.insert(Client::new(
-                    command,
-                    &lang,
-                    self.project.as_ref(),
-                    self.log,
-                )?)
+                    .get(&language)
+                    .ok_or_else(|| Error::NoServer(language.clone()))?;
+                entry.insert(Client::new(command, &language, project.as_ref(), self.log)?)
             }
         };
-        let mapping = self.lang_mapping.entry(lang).or_default();
+        let mapping = self.lang_mapping.entry(language).or_default();
 
         mapping.extend(
             self.general_mapping
@@ -728,6 +739,7 @@ mod tests {
 
     const TEST_ARGUMENT: &str = "--stdio";
     const TEST_COMMAND: &str = "language-server";
+    const TEST_LANGUAGE: &str = "rust";
     const TEST_SOURCE: &str = "fn main() {}";
 
     fn test_project() -> Project {
@@ -799,7 +811,7 @@ mod tests {
     #[test]
     fn document_extensions_are_safe_and_language_appropriate() {
         let cases = [
-            ("rust", "rs"),
+            (TEST_LANGUAGE, "rs"),
             ("typescript", "ts"),
             ("csharp", "cs"),
             ("gleam", "gleam"),
@@ -814,9 +826,9 @@ mod tests {
 
     #[test]
     fn temporary_rust_document_is_file_backed_and_removed_on_drop() {
-        let document = Document::new(TEST_SOURCE, None, "rust").unwrap();
+        let document = Document::new(TEST_SOURCE, None, TEST_LANGUAGE).unwrap();
         let path = document._temporary.as_ref().unwrap().path.clone();
-        let other_document = Document::new(TEST_SOURCE, None, "rust").unwrap();
+        let other_document = Document::new(TEST_SOURCE, None, TEST_LANGUAGE).unwrap();
         let other_path = other_document._temporary.as_ref().unwrap().path.clone();
 
         assert!(document.uri.as_str().starts_with(FILE_URI_PREFIX));
@@ -830,6 +842,14 @@ mod tests {
         drop(document);
         assert!(!path.exists());
         assert!(other_path.exists());
+    }
+
+    #[test]
+    fn server_key_stores_an_absolute_project_path() {
+        let project = Project::new(Path::new(".")).unwrap();
+        let key = ServerKey::new(LangName::from(TEST_LANGUAGE), Some(&project));
+
+        assert!(key.project.unwrap().is_absolute());
     }
 
     #[test]

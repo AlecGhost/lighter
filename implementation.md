@@ -55,8 +55,9 @@ domain socket (or loopback IPC on Windows), allowing its LSP processes to remain
 alive between invocations. `lighter daemon kill` requests a clean shutdown.
 Without a live daemon, `main` creates the registry and highlighter directly.
 The daemon module owns daemon lifecycle and state, request options, runtime
-paths and locking, cached highlighters, and application of per-request options.
-It receives already-parsed configuration and theme data from `main`.
+paths and locking, a shared server registry, and application of per-request
+options. It builds a highlighter for each request and receives already-parsed
+configuration and theme data from `main`.
 
 ### `daemon/protocol.rs`
 

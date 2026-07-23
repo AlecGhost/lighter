@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 use std::io::Write;
 use std::ops::Range;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::str::FromStr;
 
@@ -92,6 +92,7 @@ pub struct HighlightOptions {
     pub tree_sitter: bool,
     pub theme: Theme,
     pub lines: Option<LineRange>,
+    pub project: Option<PathBuf>,
 }
 
 impl Default for HighlightOptions {
@@ -102,6 +103,7 @@ impl Default for HighlightOptions {
             theme: arborium_theme::builtin::catppuccin_mocha(),
             tree_sitter: true,
             lines: None,
+            project: None,
         }
     }
 }
@@ -118,15 +120,15 @@ pub enum Error {
 
 type Result<T> = std::result::Result<T, Error>;
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Highlighter {
-    registry: RefCell<lsp::ServerRegistry>,
+    registry: Rc<RefCell<lsp::ServerRegistry>>,
     options: HighlightOptions,
     log: logging::LogLevel,
 }
 
 impl Highlighter {
-    pub fn new(registry: RefCell<lsp::ServerRegistry>) -> Self {
+    pub fn new(registry: Rc<RefCell<lsp::ServerRegistry>>) -> Self {
         Self::with_options(
             registry,
             HighlightOptions::default(),
@@ -135,7 +137,7 @@ impl Highlighter {
     }
 
     pub fn with_options(
-        registry: RefCell<lsp::ServerRegistry>,
+        registry: Rc<RefCell<lsp::ServerRegistry>>,
         options: HighlightOptions,
         log: logging::LogLevel,
     ) -> Self {
@@ -165,7 +167,7 @@ impl Highlighter {
                 self.registry
                     .try_borrow_mut()
                     .expect("Server registry already borrowed")
-                    .get_server(input.lang.clone())?
+                    .get_server(input.lang.clone(), self.options.project.as_deref())?
                     .get_semantic_spans(input.source, input.path, pattern_index)?
             }
             false => Vec::new(),
@@ -450,8 +452,9 @@ mauve = "#010203"
     #[test]
     fn disabled_lsp_does_not_request_a_server() {
         const SOURCE: &str = "plain source";
+        let registry = Rc::new(RefCell::new(lsp::ServerRegistry::default()));
         let highlighter = Highlighter::with_options(
-            RefCell::new(lsp::ServerRegistry::default()),
+            registry,
             HighlightOptions {
                 lsp: false,
                 tree_sitter: false,
