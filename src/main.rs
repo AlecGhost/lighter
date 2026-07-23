@@ -71,20 +71,6 @@ pub enum Error {
     Highlight(#[from] lighter::Error),
 }
 
-fn run_once(options: cli::Options) -> Result<()> {
-    let source = cli::read_input(options.file.as_deref())?;
-    let output = match daemon::is_running() {
-        true => daemon::highlight(
-            options.language.as_ref(),
-            &source,
-            &daemon_request(&options),
-        )?,
-        false => highlight_once(&options, &source)?,
-    };
-    print!("{output}");
-    Ok(())
-}
-
 fn highlight_once(options: &cli::Options, source: &str) -> Result<String> {
     let config = config::Config::load(options.startup.config.as_deref())?.override_theme(
         options.startup.theme.as_deref(),
@@ -103,8 +89,8 @@ fn highlight_once(options: &cli::Options, source: &str) -> Result<String> {
         RefCell::new(registry),
         lighter::HighlightOptions {
             output: options.startup.format.unwrap_or_default(),
-            lsp: !options.startup.no_lsp,
-            tree_sitter: !options.startup.no_tree_sitter,
+            lsp: !options.no_lsp,
+            tree_sitter: !options.no_tree_sitter,
             theme: config.theme,
             lines: options.lines,
         },
@@ -123,8 +109,8 @@ fn daemon_request(options: &cli::Options) -> daemon::RequestOptions {
     daemon::RequestOptions {
         project: options.project.clone(),
         lines: options.lines,
-        no_tree_sitter: options.startup.no_tree_sitter,
-        no_lsp: options.startup.no_lsp,
+        no_tree_sitter: options.no_tree_sitter,
+        no_lsp: options.no_lsp,
         format: options.startup.format,
     }
 }
@@ -138,22 +124,35 @@ fn run_daemon(action: cli::DaemonAction) -> Result<()> {
         }
         cli::DaemonAction::Kill => daemon::kill().map_err(Error::from),
         cli::DaemonAction::Serve { options } => {
-            let startup_args = options;
-            let config = config::Config::load(startup_args.config.as_deref())?.override_theme(
-                startup_args.theme.as_deref(),
-                startup_args.custom_theme.as_deref(),
+            let config = config::Config::load(options.config.as_deref())?.override_theme(
+                options.theme.as_deref(),
+                options.custom_theme.as_deref(),
             )?;
             let initial_options = daemon::Options {
                 commands: config.commands.clone(),
                 general_mapping: config.general_mapping.clone(),
                 lang_mapping: config.lang_mapping.clone(),
                 theme: config.theme.clone(),
-                format: startup_args.format.unwrap_or_default(),
-                log: startup_args.log.unwrap_or_default(),
+                format: options.format.unwrap_or_default(),
+                log: options.log.unwrap_or_default(),
             };
             daemon::serve(initial_options).map_err(Error::from)
         }
     }
+}
+
+fn run_once(options: cli::Options) -> Result<()> {
+    let source = cli::read_input(options.file.as_deref())?;
+    let output = match daemon::is_running() {
+        true => daemon::highlight(
+            options.language.as_ref(),
+            &source,
+            &daemon_request(&options),
+        )?,
+        false => highlight_once(&options, &source)?,
+    };
+    print!("{output}");
+    Ok(())
 }
 
 fn main() -> Result<()> {

@@ -99,6 +99,14 @@ pub struct Interface {
     /// Inclusive, one-based line range to output (start:end, :end, or start:).
     #[arg(long = OptionName::Lines.as_str(), value_name = "RANGE")]
     lines: Option<lighter::LineRange>,
+
+    /// Disable LSP semantic highlighting.
+    #[arg(long = OptionName::NoLsp.as_str())]
+    no_lsp: bool,
+
+    /// Disable tree-sitter syntax highlighting.
+    #[arg(long = OptionName::NoTreeSitter.as_str())]
+    no_tree_sitter: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -163,14 +171,6 @@ pub struct StartupArgs {
     #[arg(short, long = OptionName::Format.as_str(), value_enum)]
     pub format: Option<lighter::Output>,
 
-    /// Disable LSP semantic highlighting.
-    #[arg(long = OptionName::NoLsp.as_str())]
-    pub no_lsp: bool,
-
-    /// Disable tree-sitter syntax highlighting.
-    #[arg(long = OptionName::NoTreeSitter.as_str())]
-    pub no_tree_sitter: bool,
-
     /// Set stderr logging verbosity.
     #[arg(
         long = OptionName::Log.as_str(),
@@ -186,6 +186,8 @@ pub struct Options {
     pub language: lighter::LangName,
     pub project: Option<PathBuf>,
     pub lines: Option<lighter::LineRange>,
+    pub no_lsp: bool,
+    pub no_tree_sitter: bool,
     pub startup: StartupArgs,
 }
 
@@ -199,6 +201,8 @@ impl TryFrom<Interface> for Options {
             language,
             project: cli.project,
             lines: cli.lines,
+            no_lsp: cli.no_lsp,
+            no_tree_sitter: cli.no_tree_sitter,
             startup: cli.startup,
         })
     }
@@ -244,12 +248,6 @@ pub fn daemon_serve_arguments(options: &StartupArgs) -> Vec<OsString> {
             OptionName::Format,
             OsStr::new(value.get_name()),
         );
-    }
-    if options.no_lsp {
-        arguments.push(OptionName::NoLsp.flag().into());
-    }
-    if options.no_tree_sitter {
-        arguments.push(OptionName::NoTreeSitter.flag().into());
     }
     if let Some(log) = options.log {
         let value = log.to_possible_value().expect("log level has a value");
@@ -321,7 +319,7 @@ mod tests {
         assert_eq!(options.project, Some(PathBuf::from(".")));
         assert_eq!(options.lines, Some("2:4".parse().unwrap()));
         assert_eq!(options.startup.format, Some(lighter::Output::Html));
-        assert!(options.startup.no_lsp);
+        assert!(options.no_lsp);
     }
 
     #[test]
@@ -405,8 +403,6 @@ mod tests {
         let options = StartupArgs {
             theme: Some(theme.name),
             format: Some(lighter::Output::Html),
-            no_lsp: true,
-            no_tree_sitter: true,
             log: Some(logging::LogLevel::Debug),
             ..Default::default()
         };
