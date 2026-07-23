@@ -2,10 +2,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use arborium::theme::Theme;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(untagged)]
 pub enum Config {
     Builtin(String),
@@ -13,6 +13,20 @@ pub enum Config {
 }
 
 impl Config {
+    pub fn from_options(builtin: Option<&str>, custom: Option<&Path>) -> Result<Option<Self>> {
+        match (builtin, custom) {
+            (Some(name), None) => Ok(Some(Self::Builtin(name.to_owned()))),
+            (None, Some(path)) => fs::canonicalize(path)
+                .map(|path| Some(Self::Custom { path }))
+                .map_err(|source| Error::Read {
+                    path: path.to_owned(),
+                    source,
+                }),
+            (None, None) => Ok(None),
+            (Some(_), Some(_)) => unreachable!("CLI rejects conflicting theme options"),
+        }
+    }
+
     pub(crate) fn resolve_relative_to(self, config_path: &Path) -> Self {
         match self {
             Self::Custom { path } if path.is_relative() => Self::Custom {
@@ -51,13 +65,13 @@ pub fn load(
     custom: Option<&Path>,
     configured: Option<&Config>,
 ) -> Result<Theme> {
-    match (builtin, custom, configured) {
-        (Some(name), None, _) => load_builtin(name),
-        (None, Some(path), _) => load_custom(path),
-        (None, None, Some(Config::Builtin(name))) => load_builtin(name),
-        (None, None, Some(Config::Custom { path })) => load_custom(path),
-        (None, None, None) => Ok(default()),
-        (Some(_), Some(_), _) => unreachable!("CLI rejects conflicting theme options"),
+    match Config::from_options(builtin, custom)?
+        .as_ref()
+        .or(configured)
+    {
+        Some(Config::Builtin(name)) => load_builtin(name),
+        Some(Config::Custom { path }) => load_custom(path),
+        None => Ok(default()),
     }
 }
 

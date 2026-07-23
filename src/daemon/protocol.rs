@@ -4,9 +4,9 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use super::{Error, Result};
-use crate::{Input, LangName, LineRange, Output};
+use crate::{Input, LangName, LineRange, Output, theme};
 
-pub(super) const VERSION: &str = "2";
+pub(super) const VERSION: &str = "3";
 pub(super) const STOP_LANGUAGE: &str = "lighter-internal-stop";
 
 const HEADER_TERMINATOR: u8 = b'\n';
@@ -15,6 +15,8 @@ const HEADER_TERMINATOR: u8 = b'\n';
 pub struct RequestOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output: Option<Output>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theme: Option<theme::Config>,
     #[serde(default = "enabled", skip_serializing_if = "is_enabled")]
     pub lsp: bool,
     #[serde(default = "enabled", skip_serializing_if = "is_enabled")]
@@ -27,6 +29,7 @@ impl Default for RequestOptions {
     fn default() -> Self {
         Self {
             output: None,
+            theme: None,
             lsp: true,
             tree_sitter: true,
             lines: None,
@@ -284,6 +287,7 @@ mod tests {
     const HIGHLIGHT_ERROR: &str = "highlight failed";
     const PATH: &str = "source.py";
     const PROJECT: &str = "project";
+    const THEME: &str = "Catppuccin Mocha";
 
     fn input() -> Input<'static> {
         Input {
@@ -297,6 +301,7 @@ mod tests {
     fn request_options() -> RequestOptions {
         RequestOptions {
             output: Some(Output::Html),
+            theme: Some(theme::Config::Builtin(THEME.to_owned())),
             lsp: false,
             tree_sitter: false,
             lines: Some("2:4".parse().unwrap()),

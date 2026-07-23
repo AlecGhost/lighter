@@ -110,20 +110,27 @@ fn run_daemon(action: cli::DaemonAction) -> Result<()> {
 fn run_once(options: cli::Options) -> Result<()> {
     let source = cli::read_input(options.file.as_deref())?;
     let output = match daemon::is_running() {
-        true => daemon::highlight(
-            lighter::Input {
-                source: &source,
-                path: options.file.as_deref(),
-                project: options.project.as_deref(),
-                lang: options.language.clone(),
-            },
-            daemon::RequestOptions {
-                output: options.startup.format,
-                lsp: !options.no_lsp,
-                tree_sitter: !options.no_tree_sitter,
-                lines: options.lines,
-            },
-        )?,
+        true => {
+            let request_theme = theme::Config::from_options(
+                options.startup.theme.as_deref(),
+                options.startup.custom_theme.as_deref(),
+            )?;
+            daemon::highlight(
+                lighter::Input {
+                    source: &source,
+                    path: options.file.as_deref(),
+                    project: options.project.as_deref(),
+                    lang: options.language.clone(),
+                },
+                daemon::RequestOptions {
+                    output: options.startup.format,
+                    theme: request_theme,
+                    lsp: !options.no_lsp,
+                    tree_sitter: !options.no_tree_sitter,
+                    lines: options.lines,
+                },
+            )?
+        }
         false => highlight_once(&options, &source)?,
     };
     print!("{output}");

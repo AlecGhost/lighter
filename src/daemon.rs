@@ -11,7 +11,7 @@ use std::time::Duration;
 use arborium::theme::Theme;
 use thiserror::Error;
 
-use crate::{HighlightOptions, Highlighter, Input, LangName, Output, logging, lsp};
+use crate::{HighlightOptions, Highlighter, Input, LangName, Output, logging, lsp, theme};
 
 mod protocol;
 pub use protocol::RequestOptions;
@@ -74,6 +74,8 @@ pub enum Error {
     #[error("Failed to load request configuration: {0}")]
     Configuration(String),
     #[error(transparent)]
+    Theme(#[from] theme::Error),
+    #[error(transparent)]
     Highlight(#[from] crate::Error),
 }
 
@@ -110,14 +112,19 @@ impl Session {
         }
     }
 
-    fn highlight_options(&self, request: RequestOptions) -> HighlightOptions {
-        HighlightOptions {
+    fn highlight_options(&self, request: RequestOptions) -> Result<HighlightOptions> {
+        let request_theme = request
+            .theme
+            .as_ref()
+            .map(|configured| theme::load(None, None, Some(configured)))
+            .transpose()?;
+        Ok(HighlightOptions {
             output: request.output.unwrap_or(self.format),
             lsp: request.lsp,
             tree_sitter: request.tree_sitter,
-            theme: self.theme.clone(),
+            theme: request_theme.unwrap_or_else(|| self.theme.clone()),
             lines: request.lines,
-        }
+        })
     }
 
     fn highlight(&self, input: Input<'_>, options: HighlightOptions) -> Result<String> {
@@ -283,7 +290,7 @@ pub fn serve(options: Options) -> Result<()> {
     let _endpoint_guard = EndpointGuard(&paths.endpoint);
     let session = Session::new(options);
     let mut highlight = |input: Input<'_>, request: RequestOptions| {
-        let options = session.highlight_options(request);
+        let options = session.highlight_options(request)?;
         session.highlight(input, options)
     };
 
@@ -386,6 +393,7 @@ mod tests {
 
     const LANGUAGE: &str = "rust";
     const SOURCE: &str = "first\nVec<Span>\n";
+    const CUSTOM_THEME_NAME: &str = "Request theme";
 
     fn options() -> Options {
         Options {
@@ -434,13 +442,62 @@ mod tests {
             project: None,
             lang: LangName::from(LANGUAGE),
         };
-        let first_options = session.highlight_options(first);
-        let second_options = session.highlight_options(second);
+        let first_options = session.highlight_options(first).unwrap();
+        let second_options = session.highlight_options(second).unwrap();
 
         let first_output = session.highlight(input(), first_options).unwrap();
         let second_output = session.highlight(input(), second_options).unwrap();
 
         assert_eq!(first_output, "first");
         assert_eq!(second_output, "Vec&lt;Span&gt;");
+    }
+
+    #[test]
+    fn session_applies_request_themes() {
+        let session = Session::new(options());
+        let builtin = arborium::theme::builtin::all()
+            .into_iter()
+            .find(|theme| theme.name != session.theme.name)
+            .expect("at least two built-in themes");
+        let file = tempfile::Builder::new().tempfile_in(".").unwrap();
+        fs::write(
+            file.path(),
+            format!(
+                r##"
+name = {CUSTOM_THEME_NAME:?}
+variant = "dark"
+"keyword" = {{ fg = "accent" }}
+
+[palette]
+accent = "#010203"
+"##
+            ),
+        )
+        .unwrap();
+        let relative_path = Path::new(file.path().file_name().expect("temporary file has a name"));
+        assert!(relative_path.is_relative());
+        let custom = theme::Config::from_options(None, Some(relative_path))
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            &custom,
+            theme::Config::Custom { path } if path.is_absolute()
+        ));
+
+        [
+            (theme::Config::Builtin(builtin.name.clone()), builtin.name),
+            (custom, CUSTOM_THEME_NAME.to_owned()),
+        ]
+        .into_iter()
+        .for_each(|(theme, expected_name)| {
+            let request = RequestOptions {
+                theme: Some(theme),
+                ..Default::default()
+            };
+
+            let options = session.highlight_options(request).unwrap();
+
+            assert_eq!(options.theme.name, expected_name);
+        });
     }
 }
