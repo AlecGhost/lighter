@@ -9,12 +9,12 @@ use std::thread;
 use std::time::Duration;
 
 use arborium::theme::Theme;
-use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{HighlightOptions, Highlighter, Input, LangName, LineRange, Output, logging, lsp};
+use crate::{HighlightOptions, Highlighter, Input, LangName, Output, logging, lsp};
 
 mod protocol;
+pub use protocol::RequestOptions;
 
 const CLIENT_REQUEST_ID: u64 = 1;
 const STARTUP_ATTEMPTS: usize = 250;
@@ -87,24 +87,6 @@ pub struct Options {
     pub log: logging::LogLevel,
 }
 
-#[derive(Debug, Clone, Default, Eq, PartialEq, Serialize, Deserialize)]
-pub struct RequestOptions {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub project: Option<PathBuf>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lines: Option<LineRange>,
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub no_tree_sitter: bool,
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub no_lsp: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub format: Option<Output>,
-}
-
-fn is_false(value: &bool) -> bool {
-    !value
-}
-
 struct Session {
     theme: Theme,
     format: Output,
@@ -128,30 +110,20 @@ impl Session {
         }
     }
 
-    fn highlight(
-        &mut self,
-        language: &str,
-        source: &str,
-        request: &RequestOptions,
-    ) -> Result<String> {
-        Highlighter::with_options(
-            Rc::clone(&self.registry),
-            HighlightOptions {
-                output: request.format.unwrap_or(self.format),
-                lsp: !request.no_lsp,
-                tree_sitter: !request.no_tree_sitter,
-                theme: self.theme.clone(),
-                lines: request.lines,
-                project: request.project.clone(),
-            },
-            self.log,
-        )
-        .highlight(Input {
-            source,
-            path: None,
-            lang: LangName::from(language),
-        })
-        .map_err(Error::from)
+    fn highlight_options(&self, request: RequestOptions) -> HighlightOptions {
+        HighlightOptions {
+            output: request.output.unwrap_or(self.format),
+            lsp: request.lsp,
+            tree_sitter: request.tree_sitter,
+            theme: self.theme.clone(),
+            lines: request.lines,
+        }
+    }
+
+    fn highlight(&self, input: Input<'_>, options: HighlightOptions) -> Result<String> {
+        Highlighter::with_options(Rc::clone(&self.registry), options, self.log)
+            .highlight(input)
+            .map_err(Error::from)
     }
 }
 
@@ -309,9 +281,10 @@ pub fn serve(options: Options) -> Result<()> {
     let _lock = local::acquire_lock(&paths.lock)?;
     let listener = local::bind(&paths).map_err(Error::Bind)?;
     let _endpoint_guard = EndpointGuard(&paths.endpoint);
-    let mut session = Session::new(options);
-    let mut highlight = |language: &str, source: &str, request: &RequestOptions| {
-        session.highlight(language, source, request)
+    let session = Session::new(options);
+    let mut highlight = |input: Input<'_>, request: RequestOptions| {
+        let options = session.highlight_options(request);
+        session.highlight(input, options)
     };
 
     listener
@@ -326,14 +299,14 @@ pub fn serve(options: Options) -> Result<()> {
         .unwrap_or(Ok(()))
 }
 
-fn exchange(language: &str, source: &str, options: &RequestOptions) -> Result<String> {
+fn exchange(input: Input<'_>, options: RequestOptions) -> Result<String> {
     let mut stream = local::connect(&DaemonPaths::discover()).map_err(Error::Io)?;
-    protocol::exchange(&mut stream, CLIENT_REQUEST_ID, language, source, options)
+    protocol::exchange(&mut stream, CLIENT_REQUEST_ID, input, options)
 }
 
 /// Send a highlight request to the running daemon.
-pub fn highlight(language: &str, source: &str, options: &RequestOptions) -> Result<String> {
-    exchange(language, source, options)
+pub fn highlight(input: Input<'_>, options: RequestOptions) -> Result<String> {
+    exchange(input, options)
 }
 
 fn running_at(paths: &DaemonPaths) -> bool {
@@ -346,7 +319,16 @@ pub fn is_running() -> bool {
 
 pub fn kill() -> Result<()> {
     match is_running() {
-        true => exchange(protocol::STOP_LANGUAGE, "", &RequestOptions::default()).map(|_| ()),
+        true => exchange(
+            Input {
+                source: "",
+                path: None,
+                project: None,
+                lang: LangName::from(protocol::STOP_LANGUAGE),
+            },
+            RequestOptions::default(),
+        )
+        .map(|_| ()),
         false => Err(Error::NotRunning),
     }
 }
@@ -430,10 +412,10 @@ mod tests {
 
     #[test]
     fn session_applies_request_options_to_each_highlight() {
-        let mut session = Session::new(options());
+        let session = Session::new(options());
         let request = RequestOptions {
-            no_lsp: true,
-            no_tree_sitter: true,
+            lsp: false,
+            tree_sitter: false,
             ..Default::default()
         };
         let first = RequestOptions {
@@ -442,12 +424,21 @@ mod tests {
         };
         let second = RequestOptions {
             lines: Some("2:2".parse().unwrap()),
-            format: Some(Output::Html),
+            output: Some(Output::Html),
             ..request
         };
 
-        let first_output = session.highlight(LANGUAGE, SOURCE, &first).unwrap();
-        let second_output = session.highlight(LANGUAGE, SOURCE, &second).unwrap();
+        let input = || Input {
+            source: SOURCE,
+            path: None,
+            project: None,
+            lang: LangName::from(LANGUAGE),
+        };
+        let first_options = session.highlight_options(first);
+        let second_options = session.highlight_options(second);
+
+        let first_output = session.highlight(input(), first_options).unwrap();
+        let second_output = session.highlight(input(), second_options).unwrap();
 
         assert_eq!(first_output, "first");
         assert_eq!(second_output, "Vec&lt;Span&gt;");

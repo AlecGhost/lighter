@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 use std::io::Write;
 use std::ops::Range;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::rc::Rc;
 use std::str::FromStr;
 
@@ -24,6 +24,7 @@ pub type LangName = Rc<str>;
 pub struct Input<'a> {
     pub source: &'a str,
     pub path: Option<&'a Path>,
+    pub project: Option<&'a Path>,
     pub lang: LangName,
 }
 
@@ -92,7 +93,6 @@ pub struct HighlightOptions {
     pub tree_sitter: bool,
     pub theme: Theme,
     pub lines: Option<LineRange>,
-    pub project: Option<PathBuf>,
 }
 
 impl Default for HighlightOptions {
@@ -103,7 +103,6 @@ impl Default for HighlightOptions {
             theme: arborium_theme::builtin::catppuccin_mocha(),
             tree_sitter: true,
             lines: None,
-            project: None,
         }
     }
 }
@@ -167,7 +166,7 @@ impl Highlighter {
                 self.registry
                     .try_borrow_mut()
                     .expect("Server registry already borrowed")
-                    .get_server(input.lang.clone(), self.options.project.as_deref())?
+                    .get_server(input.lang.clone(), input.project)?
                     .get_semantic_spans(input.source, input.path, pattern_index)?
             }
             false => Vec::new(),
@@ -467,6 +466,7 @@ mauve = "#010203"
             .highlight(Input {
                 source: SOURCE,
                 path: None,
+                project: None,
                 lang: LangName::from("no-server"),
             })
             .unwrap();

@@ -93,7 +93,6 @@ fn highlight_once(options: &cli::Options, source: &str) -> Result<String> {
             tree_sitter: !options.no_tree_sitter,
             theme: config.theme,
             lines: options.lines,
-            project: options.project.clone(),
         },
         log,
     );
@@ -101,19 +100,10 @@ fn highlight_once(options: &cli::Options, source: &str) -> Result<String> {
         .highlight(lighter::Input {
             source,
             path: options.file.as_deref(),
+            project: options.project.as_deref(),
             lang: options.language.clone(),
         })
         .map_err(Error::from)
-}
-
-fn daemon_request(options: &cli::Options) -> daemon::RequestOptions {
-    daemon::RequestOptions {
-        project: options.project.clone(),
-        lines: options.lines,
-        no_tree_sitter: options.no_tree_sitter,
-        no_lsp: options.no_lsp,
-        format: options.startup.format,
-    }
 }
 
 fn run_daemon(action: cli::DaemonAction) -> Result<()> {
@@ -125,10 +115,8 @@ fn run_daemon(action: cli::DaemonAction) -> Result<()> {
         }
         cli::DaemonAction::Kill => daemon::kill().map_err(Error::from),
         cli::DaemonAction::Serve { options } => {
-            let config = config::Config::load(options.config.as_deref())?.override_theme(
-                options.theme.as_deref(),
-                options.custom_theme.as_deref(),
-            )?;
+            let config = config::Config::load(options.config.as_deref())?
+                .override_theme(options.theme.as_deref(), options.custom_theme.as_deref())?;
             let initial_options = daemon::Options {
                 commands: config.commands.clone(),
                 general_mapping: config.general_mapping.clone(),
@@ -146,9 +134,18 @@ fn run_once(options: cli::Options) -> Result<()> {
     let source = cli::read_input(options.file.as_deref())?;
     let output = match daemon::is_running() {
         true => daemon::highlight(
-            options.language.as_ref(),
-            &source,
-            &daemon_request(&options),
+            lighter::Input {
+                source: &source,
+                path: options.file.as_deref(),
+                project: options.project.as_deref(),
+                lang: options.language.clone(),
+            },
+            daemon::RequestOptions {
+                output: options.startup.format,
+                lsp: !options.no_lsp,
+                tree_sitter: !options.no_tree_sitter,
+                lines: options.lines,
+            },
         )?,
         false => highlight_once(&options, &source)?,
     };

@@ -63,12 +63,10 @@ configuration and theme data from `main`.
 
 Daemon messages consist of a single-line JSON header followed by exactly the
 number of body bytes declared by `length`. Request headers contain `version`,
-`id`, `lang`, and `length`, plus optional project, lines, no-tree-sitter,
-no-LSP, format, and absolute config-path overrides. Response headers contain
-`version`, the matching `id`, and `length`; failed responses additionally
-contain `error` and always have a zero length. A config override replaces the
-daemon's current config and drops its highlighter cache, cleanly shutting down
-the associated LSP registries before subsequent requests create replacements.
+`id`, `lang`, and `length`, optional input paths for the source file and
+project, and output, LSP, tree-sitter, and line-selection options. Response
+headers contain `version`, the matching `id`, and `length`; failed responses
+additionally contain `error` and always have a zero length.
 
 ### `lib.rs`
 
