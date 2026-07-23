@@ -255,7 +255,6 @@ mod tests {
             no_tree_sitter: true,
             no_lsp: true,
             format: Some(crate::Output::Html),
-            config: Some(PathBuf::from("/tmp/lighter-config.toml")),
         };
 
         write_request(

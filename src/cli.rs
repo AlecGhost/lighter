@@ -172,27 +172,6 @@ pub struct StartupArgs {
     pub log: Option<logging::LogLevel>,
 }
 
-impl StartupArgs {
-    pub fn resolve_paths(mut self) -> Result<Self> {
-        self.config = canonicalize_path(self.config, |path, source| Error::ConfigRead {
-            path,
-            source,
-        })?;
-        self.custom_theme = canonicalize_path(self.custom_theme, |path, source| {
-            Error::ThemeRead { path, source }
-        })?;
-        Ok(self)
-    }
-}
-
-fn canonicalize_path(
-    path: Option<PathBuf>,
-    error: impl FnOnce(PathBuf, io::Error) -> Error,
-) -> Result<Option<PathBuf>> {
-    path.map(|path| fs::canonicalize(&path).map_err(|source| error(path, source)))
-        .transpose()
-}
-
 #[derive(Debug)]
 pub struct Options {
     pub file: Option<PathBuf>,
@@ -210,7 +189,6 @@ impl Options {
             no_tree_sitter: self.startup.no_tree_sitter,
             no_lsp: self.startup.no_lsp,
             format: self.startup.format,
-            config: self.startup.config.clone(),
         }
     }
 }
@@ -220,13 +198,12 @@ impl TryFrom<Interface> for Options {
 
     fn try_from(cli: Interface) -> Result<Self> {
         let language = resolve_language(cli.lang.as_deref(), cli.file.as_deref())?;
-        let startup = cli.startup.resolve_paths()?;
         Ok(Self {
             file: cli.file,
             language,
             project: cli.project,
             lines: cli.lines,
-            startup,
+            startup: cli.startup,
         })
     }
 }

@@ -79,14 +79,11 @@ pub enum Error {
 
 #[derive(Clone, Debug)]
 pub struct Options {
-    pub config: Option<PathBuf>,
     pub commands: lsp::Commands,
     pub general_mapping: lsp::CaptureMapping,
     pub lang_mapping: lsp::LangCaptureMapping,
     pub theme: Theme,
-    pub format: Option<Output>,
-    pub no_lsp: bool,
-    pub no_tree_sitter: bool,
+    pub format: Output,
     pub log: logging::LogLevel,
 }
 
@@ -102,8 +99,6 @@ pub struct RequestOptions {
     pub no_lsp: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub format: Option<Output>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub config: Option<PathBuf>,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -128,17 +123,12 @@ impl Session {
         }
     }
 
-    fn highlight<E>(
+    fn highlight(
         &mut self,
         language: &str,
         source: &str,
         request: &RequestOptions,
-        load_config: &mut impl FnMut(&Path) -> std::result::Result<Options, E>,
-    ) -> Result<String>
-    where
-        E: std::fmt::Display,
-    {
-        self.apply_config(request.config.as_deref(), load_config)?;
+    ) -> Result<String> {
         let key = HighlighterKey {
             project: request.project.clone(),
         };
@@ -166,9 +156,9 @@ impl Session {
             .get_mut(&key)
             .expect("highlighter was inserted");
         highlighter.set_options(HighlightOptions {
-            output: request.format.or(self.options.format).unwrap_or_default(),
-            lsp: !(self.options.no_lsp || request.no_lsp),
-            tree_sitter: !(self.options.no_tree_sitter || request.no_tree_sitter),
+            output: request.format.unwrap_or(self.options.format),
+            lsp: !request.no_lsp,
+            tree_sitter: !request.no_tree_sitter,
             theme: self.options.theme.clone(),
             lines: request.lines,
         });
@@ -179,23 +169,6 @@ impl Session {
                 lang: LangName::from(language),
             })
             .map_err(Error::from)
-    }
-
-    fn apply_config<E>(
-        &mut self,
-        path: Option<&Path>,
-        load_config: &mut impl FnMut(&Path) -> std::result::Result<Options, E>,
-    ) -> Result<()>
-    where
-        E: std::fmt::Display,
-    {
-        let Some(path) = path.filter(|path| Some(*path) != self.options.config.as_deref()) else {
-            return Ok(());
-        };
-        self.options =
-            load_config(path).map_err(|error| Error::Configuration(error.to_string()))?;
-        self.highlighters.clear();
-        Ok(())
     }
 }
 
@@ -346,13 +319,7 @@ impl Drop for EndpointGuard<'_> {
 }
 
 /// Acquire the singleton lock and serve highlight requests until a stop request arrives.
-pub fn serve<E>(
-    options: Options,
-    mut load_config: impl FnMut(&Path) -> std::result::Result<Options, E>,
-) -> Result<()>
-where
-    E: std::fmt::Display,
-{
+pub fn serve(options: Options) -> Result<()> {
     detach();
     let paths = DaemonPaths::discover();
     local::prepare_directory(&paths.directory).map_err(Error::RuntimeDirectory)?;
@@ -361,7 +328,7 @@ where
     let _endpoint_guard = EndpointGuard(&paths.endpoint);
     let mut session = Session::new(options);
     let mut highlight = |language: &str, source: &str, request: &RequestOptions| {
-        session.highlight(language, source, request, &mut load_config)
+        session.highlight(language, source, request)
     };
 
     listener
@@ -457,16 +424,13 @@ mod tests {
     const LANGUAGE: &str = "rust";
     const SOURCE: &str = "first\nVec<Span>\n";
 
-    fn options(config: Option<PathBuf>) -> Options {
+    fn options() -> Options {
         Options {
-            config,
             commands: lsp::default_commands(),
             general_mapping: lsp::CaptureMapping::new(),
             lang_mapping: lsp::LangCaptureMapping::new(),
             theme: arborium_theme::builtin::catppuccin_mocha(),
-            format: None,
-            no_lsp: true,
-            no_tree_sitter: true,
+            format: Output::Ansi,
             log: logging::LogLevel::default(),
         }
     }
@@ -489,7 +453,7 @@ mod tests {
 
     #[test]
     fn session_reuses_project_highlighter_across_render_options() {
-        let mut session = Session::new(options(None));
+        let mut session = Session::new(options());
         let first = RequestOptions {
             lines: Some("1:1".parse().unwrap()),
             ..Default::default()
@@ -501,39 +465,14 @@ mod tests {
         };
 
         let first_output = session
-            .highlight(LANGUAGE, SOURCE, &first, &mut no_config)
+            .highlight(LANGUAGE, SOURCE, &first)
             .unwrap();
         let second_output = session
-            .highlight(LANGUAGE, SOURCE, &second, &mut no_config)
+            .highlight(LANGUAGE, SOURCE, &second)
             .unwrap();
 
         assert_eq!(first_output, "first");
         assert_eq!(second_output, "Vec&lt;Span&gt;");
         assert_eq!(session.highlighters.len(), 1);
-    }
-
-    #[test]
-    fn request_config_replaces_cached_highlighters() {
-        let initial = PathBuf::from("initial.toml");
-        let replacement = PathBuf::from("replacement.toml");
-        let mut session = Session::new(options(Some(initial)));
-        session
-            .highlight(LANGUAGE, SOURCE, &RequestOptions::default(), &mut no_config)
-            .unwrap();
-        let expected = replacement.clone();
-        let mut load_config = move |path: &Path| {
-            assert_eq!(path, expected);
-            Ok::<_, Infallible>(options(Some(path.to_owned())))
-        };
-
-        session
-            .apply_config(Some(&replacement), &mut load_config)
-            .unwrap();
-
-        assert!(session.highlighters.is_empty());
-        assert_eq!(
-            session.options.config.as_deref(),
-            Some(replacement.as_path())
-        );
     }
 }

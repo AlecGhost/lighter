@@ -119,41 +119,29 @@ fn highlight_once(options: &cli::Options, source: &str) -> Result<String> {
         .map_err(Error::from)
 }
 
-fn daemon_options(config: &config::Config, defaults: &cli::StartupArgs) -> daemon::Options {
-    daemon::Options {
-        config: config.path.clone(),
-        commands: config.commands.clone(),
-        general_mapping: config.general_mapping.clone(),
-        lang_mapping: config.lang_mapping.clone(),
-        theme: config.theme.clone(),
-        format: defaults.format,
-        no_lsp: defaults.no_lsp,
-        no_tree_sitter: defaults.no_tree_sitter,
-        log: defaults.log.unwrap_or_default(),
-    }
-}
-
 fn run_daemon(action: cli::DaemonAction) -> Result<()> {
     match action {
         cli::DaemonAction::Spawn { options } => {
-            let options = options.resolve_paths()?;
             // load in order to fail fast
             let _config = config::Config::load(options.config.as_deref())?;
             daemon::spawn(&cli::daemon_serve_arguments(&options)).map_err(Error::from)
         }
         cli::DaemonAction::Kill => daemon::kill().map_err(Error::from),
         cli::DaemonAction::Serve { options } => {
-            let startup_args = options.resolve_paths()?;
-            let config = config::Config::load(startup_args.config.as_deref())?;
-            let initial_options = daemon_options(&config, &startup_args);
-            let defaults = startup_args.clone();
-            daemon::serve(initial_options, move |path| {
-                let mut options = defaults.clone();
-                options.config = Some(path.to_owned());
-                config::Config::load(options.config.as_deref())
-                    .map(|config| daemon_options(&config, &options))
-            })
-            .map_err(Error::from)
+            let startup_args = options;
+            let config = config::Config::load(startup_args.config.as_deref())?.override_theme(
+                startup_args.theme.as_deref(),
+                startup_args.custom_theme.as_deref(),
+            )?;
+            let initial_options = daemon::Options {
+                commands: config.commands.clone(),
+                general_mapping: config.general_mapping.clone(),
+                lang_mapping: config.lang_mapping.clone(),
+                theme: config.theme.clone(),
+                format: startup_args.format.unwrap_or_default(),
+                log: startup_args.log.unwrap_or_default(),
+            };
+            daemon::serve(initial_options).map_err(Error::from)
         }
     }
 }
