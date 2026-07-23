@@ -90,7 +90,7 @@ impl CommandEntry {
     }
 }
 
-/// Default server commands
+/// Default commands for language servers that provide full-document semantic tokens.
 pub fn default_commands() -> Commands {
     let entries: &[(&str, &str, &[&str])] = &[
         ("rust", "rust-analyzer", &[]),
@@ -101,25 +101,15 @@ pub fn default_commands() -> Commands {
         ("jsx", "typescript-language-server", &["--stdio"]),
         ("c", "clangd", &[]),
         ("cpp", "clangd", &[]),
-        ("go", "gopls", &[]),
         ("java", "jdtls", &[]),
         ("lua", "lua-language-server", &[]),
         ("zig", "zls", &[]),
-        ("ruby", "solargraph", &["stdio"]),
-        ("html", "vscode-html-language-server", &["--stdio"]),
-        ("css", "vscode-css-language-server", &["--stdio"]),
-        ("json", "vscode-json-language-server", &["--stdio"]),
-        ("toml", "taplo", &["lsp", "stdio"]),
-        ("yaml", "yaml-language-server", &["--stdio"]),
-        ("bash", "bash-language-server", &["start"]),
-        ("kotlin", "kotlin-language-server", &[]),
+        ("ruby", "ruby-lsp", &[]),
+        ("kotlin", "kotlin-lsp", &[]),
         ("swift", "sourcekit-lsp", &[]),
-        ("elixir", "elixir-ls", &[]),
         ("haskell", "haskell-language-server-wrapper", &["--lsp"]),
         ("ocaml", "ocamllsp", &[]),
-        ("latex", "texlab", &[]),
-        ("dart", "dart", &["language-server", "--protocol=lsp"]),
-        ("csharp", "OmniSharp", &["--languageserver"]),
+        ("dart", "dart", &["language-server"]),
     ];
 
     entries
