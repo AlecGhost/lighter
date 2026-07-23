@@ -35,9 +35,33 @@ struct RawConfig {
     #[serde(default)]
     theme: Option<theme::Config>,
     #[serde(default)]
-    servers: HashMap<String, String>,
+    servers: HashMap<String, ServerEntry>,
     #[serde(default)]
     captures: HashMap<String, CaptureMapping>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum ServerEntry {
+    Command(String),
+    Detailed {
+        command: String,
+        #[serde(default = "empty_server_configuration")]
+        config: lsp::ServerConfiguration,
+    },
+}
+
+impl ServerEntry {
+    fn into_parts(self) -> (String, lsp::ServerConfiguration) {
+        match self {
+            Self::Command(command) => (command, empty_server_configuration()),
+            Self::Detailed { command, config } => (command, config),
+        }
+    }
+}
+
+fn empty_server_configuration() -> lsp::ServerConfiguration {
+    serde_json::json!({})
 }
 
 #[derive(Debug, Deserialize)]
@@ -65,8 +89,9 @@ impl Config {
         } = raw;
         let configured_commands = servers
             .into_iter()
-            .map(|(language, command)| {
+            .map(|(language, server)| {
                 let language = LangName::from(language);
+                let (command, configuration) = server.into_parts();
                 let parts = shlex::split(&command).ok_or_else(|| Error::InvalidCommand {
                     language: language.clone(),
                     command,
@@ -76,7 +101,7 @@ impl Config {
                 };
                 Ok((
                     language,
-                    lsp::CommandEntry::new(program, args, serde_json::json!({})),
+                    lsp::CommandEntry::new(program, args, configuration),
                 ))
             })
             .collect::<Result<Vec<_>>>()?;
@@ -137,24 +162,59 @@ mod tests {
     }
 
     #[test]
-    fn loads_commands_and_capture_mappings_from_config() {
+    fn loads_server_entries_and_capture_mappings_from_config() {
+        const SHORTHAND_LANGUAGE: &str = "python";
+        const DETAILED_LANGUAGE: &str = "go";
         const SERVER: &str = "custom-server";
+        const STDIO_ARGUMENT: &str = "--stdio";
+        const MULTI_WORD_ARGUMENT: &str = "multi word";
+        const DETAILED_ARGUMENT: &str = "serve";
+        const CONFIG_SECTION: &str = "gopls";
+        const CONFIG_OPTION: &str = "semanticTokens";
+        const CONFIG_LIST: &str = "analyses";
+        const CONFIG_LIST_VALUE: &str = "unusedparams";
+        const CONFIG_NUMBER: &str = "threshold";
         const CAPTURE: &str = "decorator";
         const MAPPING: &str = "constant";
         let config = config_from_source(&format!(
             r#"
     [servers]
-    python = "{SERVER} --stdio 'multi word'"
+    {SHORTHAND_LANGUAGE} = "{SERVER} {STDIO_ARGUMENT} '{MULTI_WORD_ARGUMENT}'"
+
+    [servers.{DETAILED_LANGUAGE}]
+    command = "{SERVER} {DETAILED_ARGUMENT}"
+    config = {{ {CONFIG_SECTION} = {{ {CONFIG_OPTION} = true, {CONFIG_LIST} = ["{CONFIG_LIST_VALUE}"], {CONFIG_NUMBER} = 2.5 }} }}
 
     [captures]
     {CAPTURE} = "{MAPPING}"
     "#,
         ))
         .unwrap();
-        let command = config.commands.get("python").unwrap();
+        let shorthand = config.commands.get(SHORTHAND_LANGUAGE).unwrap();
+        let detailed = config.commands.get(DETAILED_LANGUAGE).unwrap();
 
-        assert_eq!(command.command, SERVER);
-        assert_eq!(command.args, ["--stdio", "multi word"]);
+        assert_eq!(
+            shorthand,
+            &lsp::CommandEntry::new(
+                SERVER,
+                &[STDIO_ARGUMENT, MULTI_WORD_ARGUMENT],
+                serde_json::json!({})
+            )
+        );
+        assert_eq!(
+            detailed,
+            &lsp::CommandEntry::new(
+                SERVER,
+                &[DETAILED_ARGUMENT],
+                serde_json::json!({
+                    (CONFIG_SECTION): {
+                        (CONFIG_OPTION): true,
+                        (CONFIG_LIST): [CONFIG_LIST_VALUE],
+                        (CONFIG_NUMBER): 2.5,
+                    },
+                }),
+            )
+        );
         assert_eq!(config.general_mapping.get(CAPTURE).unwrap(), MAPPING);
     }
 
