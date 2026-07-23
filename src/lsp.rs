@@ -12,6 +12,7 @@ use lsp_types::{
     TextDocumentItem, TokenFormat, Uri, WindowClientCapabilities, WorkDoneProgressParams,
     WorkspaceClientCapabilities, WorkspaceFolder,
 };
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -70,6 +71,7 @@ pub enum Error {
 pub type CaptureMapping = HashMap<String, String>;
 pub type LangCaptureMapping = HashMap<LangName, CaptureMapping>;
 pub type Commands = HashMap<LangName, CommandEntry>;
+pub type ServerConfiguration = Value;
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// A single LSP server entry.
@@ -79,43 +81,74 @@ pub struct CommandEntry {
     pub command: String,
     /// Arguments passed to the server (e.g. `["--stdio"]`).
     pub args: Vec<String>,
+    /// LSP workspace configuration values keyed by the section requested by the server.
+    pub configuration: ServerConfiguration,
 }
 
 impl CommandEntry {
-    pub fn new<S: AsRef<str>>(command: &str, args: &[S]) -> Self {
+    pub fn new<S: AsRef<str>>(
+        command: &str,
+        args: &[S],
+        configuration: ServerConfiguration,
+    ) -> Self {
         Self {
             command: command.to_owned(),
             args: args.iter().map(|arg| arg.as_ref().to_owned()).collect(),
+            configuration,
         }
     }
 }
 
 /// Default commands for language servers that provide full-document semantic tokens.
 pub fn default_commands() -> Commands {
-    let entries: &[(&str, &str, &[&str])] = &[
-        ("rust", "rust-analyzer", &[]),
-        ("python", "basedpyright-langserver", &["--stdio"]),
-        ("typescript", "typescript-language-server", &["--stdio"]),
-        ("javascript", "typescript-language-server", &["--stdio"]),
-        ("tsx", "typescript-language-server", &["--stdio"]),
-        ("jsx", "typescript-language-server", &["--stdio"]),
-        ("c", "clangd", &[]),
-        ("cpp", "clangd", &[]),
-        ("java", "jdtls", &[]),
-        ("lua", "lua-language-server", &[]),
-        ("zig", "zls", &[]),
-        ("ruby", "ruby-lsp", &[]),
-        ("kotlin", "kotlin-lsp", &[]),
-        ("swift", "sourcekit-lsp", &[]),
-        ("haskell", "haskell-language-server-wrapper", &["--lsp"]),
-        ("ocaml", "ocamllsp", &[]),
-        ("dart", "dart", &["language-server"]),
+    let entries: [(&str, &str, &[&str], Value); _] = [
+        ("rust", "rust-analyzer", &[], json!({})),
+        ("python", "basedpyright-langserver", &["--stdio"], json!({})),
+        (
+            "typescript",
+            "typescript-language-server",
+            &["--stdio"],
+            json!({}),
+        ),
+        (
+            "javascript",
+            "typescript-language-server",
+            &["--stdio"],
+            json!({}),
+        ),
+        ("tsx", "typescript-language-server", &["--stdio"], json!({})),
+        ("jsx", "typescript-language-server", &["--stdio"], json!({})),
+        ("c", "clangd", &[], json!({})),
+        ("cpp", "clangd", &[], json!({})),
+        ("java", "jdtls", &[], json!({})),
+        ("lua", "lua-language-server", &[], json!({})),
+        ("zig", "zls", &[], json!({})),
+        ("ruby", "ruby-lsp", &[], json!({})),
+        ("kotlin", "kotlin-lsp", &[], json!({})),
+        ("swift", "sourcekit-lsp", &[], json!({})),
+        (
+            "haskell",
+            "haskell-language-server-wrapper",
+            &["--lsp"],
+            json!({}),
+        ),
+        ("ocaml", "ocamllsp", &[], json!({})),
+        ("dart", "dart", &["language-server"], json!({})),
+        (
+            "go",
+            "gopls",
+            &[],
+            json!({ ("gopls"): { "semanticTokens": true } }),
+        ),
     ];
 
     entries
-        .iter()
-        .map(|(language, command, args)| {
-            (LangName::from(*language), CommandEntry::new(command, args))
+        .into_iter()
+        .map(|(language, command, args, configuration)| {
+            (
+                LangName::from(language),
+                CommandEntry::new(command, args, configuration),
+            )
         })
         .collect()
 }
@@ -345,7 +378,7 @@ impl Client {
 
         Ok(Connection {
             child,
-            rpc: rpc::Connection::new(stdout, stdin, log),
+            rpc: rpc::Connection::new(stdout, stdin, command_entry.configuration.clone(), log),
         })
     }
 
@@ -470,8 +503,9 @@ fn initialize_params(project: Option<&Project>) -> InitializeParams {
                 semantic_tokens: Some(semantic_tokens),
                 ..Default::default()
             }),
-            workspace: project.map(|_| WorkspaceClientCapabilities {
-                workspace_folders: Some(true),
+            workspace: Some(WorkspaceClientCapabilities {
+                configuration: Some(true),
+                workspace_folders: project.map(|_| true),
                 ..Default::default()
             }),
             ..Default::default()
@@ -737,7 +771,7 @@ mod tests {
     }
 
     fn test_command_entry() -> CommandEntry {
-        CommandEntry::new(TEST_COMMAND, &[TEST_ARGUMENT])
+        CommandEntry::new(TEST_COMMAND, &[TEST_ARGUMENT], json!({}))
     }
 
     fn semantic_options(
@@ -784,9 +818,11 @@ mod tests {
     fn client_advertises_window_message_and_progress_support() {
         let params = initialize_params(None);
         let window = params.capabilities.window.unwrap();
+        let workspace = params.capabilities.workspace.unwrap();
 
         assert_eq!(window.work_done_progress, Some(true));
         assert!(window.show_message.is_some());
+        assert_eq!(workspace.configuration, Some(true));
     }
 
     #[test]
@@ -856,19 +892,22 @@ mod tests {
         assert_eq!(command.get_current_dir(), Some(project.path.as_path()));
         assert_eq!(params.root_uri.as_ref(), Some(&project.folder.uri));
         assert_eq!(folders, std::slice::from_ref(&project.folder));
+        assert_eq!(workspace.configuration, Some(true));
         assert_eq!(workspace.workspace_folders, Some(true));
     }
 
     #[test]
     #[allow(deprecated)]
-    fn server_has_no_workspace_without_project() {
+    fn server_has_no_workspace_folder_without_project() {
         let command = server_command(&test_command_entry(), None);
         let params = initialize_params(None);
+        let workspace = params.capabilities.workspace.unwrap();
 
         assert_eq!(command.get_current_dir(), None);
         assert!(params.root_uri.is_none());
         assert!(params.workspace_folders.is_none());
-        assert!(params.capabilities.workspace.is_none());
+        assert_eq!(workspace.configuration, Some(true));
+        assert!(workspace.workspace_folders.is_none());
     }
 
     #[test]

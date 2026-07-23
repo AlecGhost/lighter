@@ -75,7 +75,10 @@ impl Config {
                 let Some((program, args)) = parts.split_first() else {
                     return Err(Error::EmptyCommand(language));
                 };
-                Ok((language, lighter::lsp::CommandEntry::new(program, args)))
+                Ok((
+                    language,
+                    lighter::lsp::CommandEntry::new(program, args, serde_json::json!({})),
+                ))
             })
             .collect::<Result<Vec<_>>>()?;
         let mut commands = lighter::lsp::default_commands();

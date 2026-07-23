@@ -1,9 +1,11 @@
 use lsp_types::notification::{LogMessage, Notification, Progress, ShowMessage};
-use lsp_types::request::{Request, ShowMessageRequest, WorkDoneProgressCreate};
+use lsp_types::request::{
+    Request, ShowMessageRequest, WorkDoneProgressCreate, WorkspaceConfiguration,
+};
 use lsp_types::{
-    LogMessageParams, MessageActionItem, MessageType, ProgressParams, ProgressParamsValue,
-    ProgressToken, ShowMessageParams, ShowMessageRequestParams, WorkDoneProgress,
-    WorkDoneProgressCreateParams,
+    ConfigurationParams, LogMessageParams, MessageActionItem, MessageType, ProgressParams,
+    ProgressParamsValue, ProgressToken, ShowMessageParams, ShowMessageRequestParams,
+    WorkDoneProgress, WorkDoneProgressCreateParams,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -15,6 +17,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 use thiserror::Error;
 
+use super::ServerConfiguration;
 use crate::logging::LogLevel;
 
 const JSON_RPC_VERSION: &str = "2.0";
@@ -65,6 +68,7 @@ pub(crate) struct Connection {
     incoming: Receiver<Result<IncomingMessage>>,
     writer: Box<dyn Write + Send>,
     message_output: Box<dyn Write + Send>,
+    configuration: ServerConfiguration,
     log: LogLevel,
     next_request_id: u64,
     active_progress: HashSet<ProgressToken>,
@@ -131,14 +135,30 @@ impl fmt::Debug for Connection {
 }
 
 impl Connection {
-    pub(crate) fn new(stdout: ChildStdout, stdin: ChildStdin, log: LogLevel) -> Self {
-        Self::from_io(stdout, stdin, std::io::stderr(), log)
+    pub(crate) fn new(
+        stdout: ChildStdout,
+        stdin: ChildStdin,
+        configuration: ServerConfiguration,
+        log: LogLevel,
+    ) -> Self {
+        Self::from_io_with_configuration(stdout, stdin, std::io::stderr(), configuration, log)
     }
 
+    #[cfg(test)]
     fn from_io(
         reader: impl Read + Send + 'static,
         writer: impl Write + Send + 'static,
         message_output: impl Write + Send + 'static,
+        log: LogLevel,
+    ) -> Self {
+        Self::from_io_with_configuration(reader, writer, message_output, serde_json::json!({}), log)
+    }
+
+    fn from_io_with_configuration(
+        reader: impl Read + Send + 'static,
+        writer: impl Write + Send + 'static,
+        message_output: impl Write + Send + 'static,
+        configuration: ServerConfiguration,
         log: LogLevel,
     ) -> Self {
         let (sender, incoming) = mpsc::channel();
@@ -157,6 +177,7 @@ impl Connection {
             incoming,
             writer: Box::new(writer),
             message_output: Box::new(message_output),
+            configuration,
             log,
             next_request_id: 1,
             active_progress: HashSet::new(),
@@ -297,6 +318,16 @@ impl Connection {
                 let _: WorkDoneProgressCreateParams = serde_json::from_value(message.params)?;
                 self.respond(&id, ())?;
             }
+            WorkspaceConfiguration::METHOD => {
+                let id = request_id(&message)?.clone();
+                let params: ConfigurationParams = serde_json::from_value(message.params)?;
+                let configuration = params
+                    .items
+                    .iter()
+                    .map(|item| self.configuration_for(item.section.as_deref()))
+                    .collect::<Vec<_>>();
+                self.respond(&id, configuration)?;
+            }
             _ => {
                 if let Some(id) = message.id.as_ref() {
                     self.respond_method_not_found(id)?;
@@ -305,6 +336,17 @@ impl Connection {
         }
 
         Ok(None)
+    }
+
+    fn configuration_for(&self, section: Option<&str>) -> Value {
+        match section {
+            Some(section) => self
+                .configuration
+                .get(section)
+                .cloned()
+                .unwrap_or(Value::Null),
+            None => self.configuration.clone(),
+        }
     }
 
     fn handle_progress(&mut self, params: ProgressParams) -> Result<()> {
@@ -445,7 +487,8 @@ fn read_message<T: for<'de> Deserialize<'de>>(reader: &mut impl BufRead) -> Resu
 mod tests {
     use super::*;
     use lsp_types::{
-        MessageType, WorkDoneProgressBegin, WorkDoneProgressEnd, WorkDoneProgressReport,
+        ConfigurationItem, MessageType, WorkDoneProgressBegin, WorkDoneProgressEnd,
+        WorkDoneProgressReport,
     };
     use serde_json::json;
     use std::io::{Cursor, Read};
@@ -454,6 +497,7 @@ mod tests {
     const CLIENT_REQUEST_ID: u64 = 1;
     const SHOW_MESSAGE_REQUEST_ID: u64 = 40;
     const CREATE_PROGRESS_REQUEST_ID: u64 = 41;
+    const CONFIGURATION_REQUEST_ID: u64 = 42;
     const OUTGOING_MESSAGE_COUNT: usize = 3;
     const TEST_REQUEST_METHOD: &str = "test/request";
     const TEST_PAYLOAD_TEXT: &str = "response payload";
@@ -637,12 +681,21 @@ mod tests {
         incoming: Vec<u8>,
         log: LogLevel,
     ) -> (Connection, SharedBuffer, SharedBuffer) {
+        test_connection_with_configuration(incoming, json!({}), log)
+    }
+
+    fn test_connection_with_configuration(
+        incoming: Vec<u8>,
+        configuration: ServerConfiguration,
+        log: LogLevel,
+    ) -> (Connection, SharedBuffer, SharedBuffer) {
         let protocol_output = SharedBuffer::default();
         let message_output = SharedBuffer::default();
-        let connection = Connection::from_io(
+        let connection = Connection::from_io_with_configuration(
             Cursor::new(incoming),
             protocol_output.clone(),
             message_output.clone(),
+            configuration,
             log,
         );
         (connection, protocol_output, message_output)
@@ -884,6 +937,46 @@ mod tests {
         assert_eq!(response["id"], REQUEST_ID);
         assert_eq!(response["error"]["code"], METHOD_NOT_FOUND_CODE);
         assert_eq!(response["error"]["message"], METHOD_NOT_FOUND_MESSAGE);
+    }
+
+    #[test]
+    fn returns_requested_workspace_configuration_in_order() {
+        const CONFIGURATION_SECTION: &str = "language-server";
+        const UNKNOWN_SECTION: &str = "unknown";
+        let configured_value = json!({ "semanticTokens": true });
+        let configuration = json!({ (CONFIGURATION_SECTION): configured_value });
+        let request = server_request::<WorkspaceConfiguration>(
+            CONFIGURATION_REQUEST_ID,
+            ConfigurationParams {
+                items: vec![
+                    ConfigurationItem {
+                        section: Some(CONFIGURATION_SECTION.to_owned()),
+                        ..Default::default()
+                    },
+                    ConfigurationItem {
+                        section: Some(UNKNOWN_SECTION.to_owned()),
+                        ..Default::default()
+                    },
+                    ConfigurationItem::default(),
+                ],
+            },
+        );
+        let message = serde_json::from_value(request).unwrap();
+        let (mut connection, protocol_output, _) =
+            test_connection_with_configuration(Vec::new(), configuration, LogLevel::Error);
+
+        assert!(connection.handle_incoming(message).unwrap().is_none());
+
+        let response = read_values(protocol_output.bytes(), 1).remove(0);
+        assert_eq!(response["id"], CONFIGURATION_REQUEST_ID);
+        assert_eq!(
+            response["result"],
+            json!([
+                configured_value,
+                null,
+                { (CONFIGURATION_SECTION): configured_value },
+            ])
+        );
     }
 
     #[test]
