@@ -6,13 +6,15 @@ use serde::{Deserialize, Serialize};
 use super::{Error, Result};
 use crate::{Input, LangName, LineRange, Output, theme};
 
-pub(super) const VERSION: &str = "3";
+pub(super) const VERSION: &str = "4";
 pub(super) const STOP_LANGUAGE: &str = "lighter-internal-stop";
 
 const HEADER_TERMINATOR: u8 = b'\n';
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct RequestOptions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output: Option<Output>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -28,6 +30,7 @@ pub struct RequestOptions {
 impl Default for RequestOptions {
     fn default() -> Self {
         Self {
+            config: None,
             output: None,
             theme: None,
             lsp: true,
@@ -300,6 +303,7 @@ mod tests {
 
     fn request_options() -> RequestOptions {
         RequestOptions {
+            config: Some(PathBuf::from("lighter.toml")),
             output: Some(Output::Html),
             theme: Some(theme::Config::Builtin(THEME.to_owned())),
             lsp: false,

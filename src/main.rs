@@ -33,6 +33,12 @@ pub enum Error {
     },
     #[error("Failed to read stdin")]
     StdinRead(#[source] io::Error),
+    #[error("Failed to resolve config path '{}'", .path.display())]
+    ConfigPath {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
     #[error(transparent)]
     Config(#[from] config::Error),
     #[error(transparent)]
@@ -95,9 +101,7 @@ fn run_daemon(action: cli::DaemonAction) -> Result<()> {
         cli::DaemonAction::Serve { options } => {
             let (config, theme) = load_startup(&options)?;
             let initial_options = daemon::Options {
-                commands: config.commands.clone(),
-                general_mapping: config.general_mapping.clone(),
-                lang_mapping: config.lang_mapping.clone(),
+                config,
                 theme,
                 format: options.format.unwrap_or_default(),
                 log: options.log.unwrap_or_default(),
@@ -105,6 +109,16 @@ fn run_daemon(action: cli::DaemonAction) -> Result<()> {
             daemon::serve(initial_options).map_err(Error::from)
         }
     }
+}
+
+fn request_config_path(path: Option<&std::path::Path>) -> Result<Option<PathBuf>> {
+    path.map(|path| {
+        std::path::absolute(path).map_err(|source| Error::ConfigPath {
+            path: path.to_owned(),
+            source,
+        })
+    })
+    .transpose()
 }
 
 fn run_once(options: cli::Options) -> Result<()> {
@@ -123,6 +137,7 @@ fn run_once(options: cli::Options) -> Result<()> {
                     lang: options.language.clone(),
                 },
                 daemon::RequestOptions {
+                    config: request_config_path(options.startup.config.as_deref())?,
                     output: options.startup.format,
                     theme: request_theme,
                     lsp: !options.no_lsp,
@@ -166,6 +181,7 @@ mod tests {
     use super::*;
 
     const STUB_FILE: &str = "stub.py";
+    const CONFIG_FILE: &str = "lighter.toml";
 
     fn parse_cli<T: AsRef<OsStr>>(args: &[T]) -> Result<cli::Interface> {
         cli::Interface::try_parse_from(
@@ -202,5 +218,16 @@ mod tests {
         write_error(&mut output, &error).unwrap();
 
         assert_eq!(String::from_utf8(output).unwrap(), format!("{error}\n"));
+    }
+
+    #[test]
+    fn daemon_request_config_paths_are_absolute() {
+        let path = request_config_path(Some(std::path::Path::new(CONFIG_FILE)))
+            .unwrap()
+            .unwrap();
+
+        assert!(path.is_absolute());
+        assert_eq!(path.file_name(), Some(OsStr::new(CONFIG_FILE)));
+        assert_eq!(request_config_path(None).unwrap(), None);
     }
 }

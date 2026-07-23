@@ -71,7 +71,7 @@ enum CaptureMapping {
     Language(HashMap<String, String>),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Config {
     pub commands: lsp::Commands,
     pub general_mapping: lsp::CaptureMapping,

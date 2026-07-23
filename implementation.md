@@ -58,14 +58,17 @@ The daemon module owns daemon lifecycle and state, request options, runtime
 paths and locking, a shared server registry, and application of per-request
 options. It builds a highlighter for each request, loading a request theme when
 provided, and receives already-parsed configuration and default theme data from
-`main`.
+`main`. A request containing `--config` sends its absolute path to the daemon.
+The daemon parses it and replaces its shared server registry when the parsed
+configuration differs, shutting down the old registry's live language servers.
+Equivalent configuration leaves the existing servers alive.
 
 ### `daemon/protocol.rs`
 
 Daemon messages consist of a single-line JSON header followed by exactly the
 number of body bytes declared by `length`. Request headers contain `version`,
-`id`, `lang`, and `length`, optional input paths for the source file and
-project, and output, theme, LSP, tree-sitter, and line-selection options.
+`id`, `lang`, and `length`, optional input paths for the source file, project,
+and config, and output, theme, LSP, tree-sitter, and line-selection options.
 Response headers contain `version`, the matching `id`, and `length`; failed responses
 additionally contain `error` and always have a zero length.
 

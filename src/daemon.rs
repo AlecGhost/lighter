@@ -11,7 +11,7 @@ use std::time::Duration;
 use arborium::theme::Theme;
 use thiserror::Error;
 
-use crate::{HighlightOptions, Highlighter, Input, LangName, Output, logging, lsp, theme};
+use crate::{HighlightOptions, Highlighter, Input, LangName, Output, config, logging, lsp, theme};
 
 mod protocol;
 pub use protocol::RequestOptions;
@@ -72,7 +72,7 @@ pub enum Error {
     #[error("Daemon did not become ready in time")]
     StartupTimeout,
     #[error("Failed to load request configuration: {0}")]
-    Configuration(String),
+    Configuration(#[from] config::Error),
     #[error(transparent)]
     Theme(#[from] theme::Error),
     #[error(transparent)]
@@ -81,9 +81,7 @@ pub enum Error {
 
 #[derive(Clone, Debug)]
 pub struct Options {
-    pub commands: lsp::Commands,
-    pub general_mapping: lsp::CaptureMapping,
-    pub lang_mapping: lsp::LangCaptureMapping,
+    pub config: config::Config,
     pub theme: Theme,
     pub format: Output,
     pub log: logging::LogLevel,
@@ -93,26 +91,47 @@ struct Session {
     theme: Theme,
     format: Output,
     log: logging::LogLevel,
+    config: config::Config,
     registry: Rc<RefCell<lsp::ServerRegistry>>,
 }
 
 impl Session {
     fn new(options: Options) -> Self {
-        let registry = lsp::ServerRegistry::new(
-            options.commands,
-            options.general_mapping,
-            options.lang_mapping,
-            options.log,
-        );
+        let registry = Self::registry(&options.config, options.log);
         Self {
             theme: options.theme,
             format: options.format,
             log: options.log,
+            config: options.config,
             registry: Rc::new(RefCell::new(registry)),
         }
     }
 
-    fn highlight_options(&self, request: RequestOptions) -> Result<HighlightOptions> {
+    fn registry(config: &config::Config, log: logging::LogLevel) -> lsp::ServerRegistry {
+        lsp::ServerRegistry::new(
+            config.commands.clone(),
+            config.general_mapping.clone(),
+            config.lang_mapping.clone(),
+            log,
+        )
+    }
+
+    fn update_config(&mut self, path: Option<&Path>) -> Result<()> {
+        let Some(path) = path else {
+            return Ok(());
+        };
+        let config = config::Config::load(Some(path))?;
+        match self.config == config {
+            true => {}
+            false => {
+                self.registry = Rc::new(RefCell::new(Self::registry(&config, self.log)));
+                self.config = config;
+            }
+        }
+        Ok(())
+    }
+
+    fn highlight_options(&mut self, request: RequestOptions) -> Result<HighlightOptions> {
         let request_theme = request
             .theme
             .as_ref()
@@ -288,8 +307,9 @@ pub fn serve(options: Options) -> Result<()> {
     let _lock = local::acquire_lock(&paths.lock)?;
     let listener = local::bind(&paths).map_err(Error::Bind)?;
     let _endpoint_guard = EndpointGuard(&paths.endpoint);
-    let session = Session::new(options);
+    let mut session = Session::new(options);
     let mut highlight = |input: Input<'_>, request: RequestOptions| {
+        session.update_config(request.config.as_deref())?;
         let options = session.highlight_options(request)?;
         session.highlight(input, options)
     };
@@ -394,16 +414,21 @@ mod tests {
     const LANGUAGE: &str = "rust";
     const SOURCE: &str = "first\nVec<Span>\n";
     const CUSTOM_THEME_NAME: &str = "Request theme";
+    const CHANGED_CONFIG: &str = "[captures]\nvariable = \"variable.member\"\n";
 
     fn options() -> Options {
         Options {
-            commands: lsp::default_commands(),
-            general_mapping: lsp::CaptureMapping::new(),
-            lang_mapping: lsp::LangCaptureMapping::new(),
+            config: config::Config::load(None).unwrap(),
             theme: arborium_theme::builtin::catppuccin_mocha(),
             format: Output::Ansi,
             log: logging::LogLevel::default(),
         }
+    }
+
+    fn config_file(source: &str) -> tempfile::NamedTempFile {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        fs::write(file.path(), source).unwrap();
+        file
     }
 
     #[test]
@@ -420,7 +445,7 @@ mod tests {
 
     #[test]
     fn session_applies_request_options_to_each_highlight() {
-        let session = Session::new(options());
+        let mut session = Session::new(options());
         let request = RequestOptions {
             lsp: false,
             tree_sitter: false,
@@ -454,7 +479,7 @@ mod tests {
 
     #[test]
     fn session_applies_request_themes() {
-        let session = Session::new(options());
+        let mut session = Session::new(options());
         let builtin = arborium::theme::builtin::all()
             .into_iter()
             .find(|theme| theme.name != session.theme.name)
@@ -499,5 +524,29 @@ accent = "#010203"
 
             assert_eq!(options.theme.name, expected_name);
         });
+    }
+
+    #[test]
+    fn session_replaces_registry_only_for_changed_config() {
+        let equivalent = config_file("");
+        let changed = config_file(CHANGED_CONFIG);
+        let mut session = Session::new(options());
+        let initial_registry = Rc::downgrade(&session.registry);
+
+        session.update_config(Some(equivalent.path())).unwrap();
+        assert!(Rc::ptr_eq(
+            &session.registry,
+            &initial_registry.upgrade().unwrap()
+        ));
+
+        session.update_config(Some(changed.path())).unwrap();
+        assert!(initial_registry.upgrade().is_none());
+        let changed_registry = Rc::downgrade(&session.registry);
+
+        session.update_config(Some(changed.path())).unwrap();
+        assert!(Rc::ptr_eq(
+            &session.registry,
+            &changed_registry.upgrade().unwrap()
+        ));
     }
 }
