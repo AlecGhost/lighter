@@ -77,7 +77,7 @@ fn run_once(options: cli::Options) -> Result<()> {
         true => daemon::highlight(
             options.language.as_ref(),
             &source,
-            &options.daemon_request(),
+            &daemon_request(&options),
         )?,
         false => highlight_once(&options, &source)?,
     };
@@ -117,6 +117,16 @@ fn highlight_once(options: &cli::Options, source: &str) -> Result<String> {
             lang: options.language.clone(),
         })
         .map_err(Error::from)
+}
+
+fn daemon_request(options: &cli::Options) -> daemon::RequestOptions {
+    daemon::RequestOptions {
+        project: options.project.clone(),
+        lines: options.lines,
+        no_tree_sitter: options.startup.no_tree_sitter,
+        no_lsp: options.startup.no_lsp,
+        format: options.startup.format,
+    }
 }
 
 fn run_daemon(action: cli::DaemonAction) -> Result<()> {

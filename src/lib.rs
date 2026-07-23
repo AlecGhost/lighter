@@ -84,13 +84,6 @@ pub enum Output {
     Latex,
 }
 
-pub fn builtin_theme_parser() -> clap::builder::PossibleValuesParser {
-    clap::builder::PossibleValuesParser::new(
-        arborium::theme::builtin::all()
-            .into_iter()
-            .map(|theme| theme.name),
-    )
-}
 
 #[derive(Debug)]
 pub struct HighlightOptions {

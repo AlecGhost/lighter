@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use super::{Error, Result};
 use clap::ValueEnum;
 use clap::{Args, Parser, Subcommand};
-use lighter::{daemon, logging};
+use lighter::logging;
 
 pub const BIN_NAME: &str = "lighter";
 
@@ -129,6 +129,14 @@ pub enum DaemonAction {
     },
 }
 
+fn builtin_theme_parser() -> clap::builder::PossibleValuesParser {
+    clap::builder::PossibleValuesParser::new(
+        arborium::theme::builtin::all()
+            .into_iter()
+            .map(|theme| theme.name),
+    )
+}
+
 #[derive(Debug, Clone, Default, Eq, PartialEq, Args)]
 pub struct StartupArgs {
     /// Path to a TOML config file.
@@ -140,7 +148,7 @@ pub struct StartupArgs {
         long = OptionName::Theme.as_str(),
         conflicts_with = OptionName::CustomTheme.id(),
         ignore_case = true,
-        value_parser = lighter::builtin_theme_parser()
+        value_parser = builtin_theme_parser()
     )]
     pub theme: Option<String>,
 
@@ -179,18 +187,6 @@ pub struct Options {
     pub project: Option<PathBuf>,
     pub lines: Option<lighter::LineRange>,
     pub startup: StartupArgs,
-}
-
-impl Options {
-    pub fn daemon_request(&self) -> daemon::RequestOptions {
-        daemon::RequestOptions {
-            project: self.project.clone(),
-            lines: self.lines,
-            no_tree_sitter: self.startup.no_tree_sitter,
-            no_lsp: self.startup.no_lsp,
-            format: self.startup.format,
-        }
-    }
 }
 
 impl TryFrom<Interface> for Options {
