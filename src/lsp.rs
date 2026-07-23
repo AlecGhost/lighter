@@ -661,7 +661,11 @@ fn semantic_tokens_to_spans(
                 start: u32::try_from(start).ok()?,
                 end: u32::try_from(end).ok()?,
                 capture: capture_for_token_type(token_type, captures).to_owned(),
-                pattern_index,
+                pattern_index: if token_type == &SemanticTokenType::VARIABLE {
+                    0
+                } else {
+                    pattern_index
+                },
             })
         })
         .collect()
@@ -928,5 +932,36 @@ mod tests {
         for (token_type, expected) in cases {
             assert_eq!(default_capture_for_token_type(&token_type), expected);
         }
+    }
+
+    #[test]
+    fn generic_lsp_variables_do_not_override_tree_sitter_patterns() {
+        let legend = SemanticTokensLegend {
+            token_types: vec![SemanticTokenType::VARIABLE, SemanticTokenType::FUNCTION],
+            token_modifiers: Vec::new(),
+        };
+        let tokens = [
+            SemanticToken {
+                delta_line: 0,
+                delta_start: 0,
+                length: 5,
+                token_type: 0,
+                token_modifiers_bitset: 0,
+            },
+            SemanticToken {
+                delta_line: 0,
+                delta_start: 6,
+                length: 4,
+                token_type: 1,
+                token_modifiers_bitset: 0,
+            },
+        ];
+
+        let spans = semantic_tokens_to_spans("value call", &tokens, &legend, 42, &HashMap::new());
+
+        assert_eq!(spans[0].capture, "variable");
+        assert_eq!(spans[0].pattern_index, 0);
+        assert_eq!(spans[1].capture, "function");
+        assert_eq!(spans[1].pattern_index, 42);
     }
 }

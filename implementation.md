@@ -80,7 +80,7 @@ remain with their callers.
    - Decode the delta-encoded `u32[]` to absolute `(line, char, length)`.
    - Convert `(line, char_utf16)` → byte offset (handling UTF-16).
    - Map LSP token type string → arborium capture name string (e.g. `function` → `function`, `parameter` → `variable.parameter`, `struct` → `type`). User-defined mappings from the config's `[captures]` table take precedence (e.g. `const = "constant"`), and language-specific mappings such as `[captures.rust]` take precedence over global mappings.
-   - Set `pattern_index` to `1 + max(all_existing_spans.pattern_index)` so semantic tokens win in arborium's deduplication.
+   - Set `pattern_index` to `1 + max(all_existing_spans.pattern_index)` so semantic tokens win in arborium's deduplication, except generic LSP `variable` tokens, which use `0` so more specific tree-sitter query patterns can override them.
 4. **Merge**: Append all semantic spans into the collected span vector.
 5. **Render**: Call `spans_to_ansi(source, spans, &theme)` or `spans_to_html(source, spans, &format)`.
 
