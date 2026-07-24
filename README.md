@@ -9,6 +9,9 @@ Use it to inspect highlighted code in a terminal, generate highlighted
 fragments for other tools, or add semantic highlighting to scripts and editor
 workflows.
 
+See the [live highlighter comparison](https://alecghost.github.io/lighter/) for
+side-by-side Highlight.js, Arborium, and Lighter output.
+
 ## Features
 
 - Syntax highlighting for the languages supported by Arborium
