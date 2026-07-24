@@ -1,0 +1,24 @@
+\documentclass{article}
+\usepackage[
+  custom-theme={custom theme.toml},
+  config={config file.toml}
+]{lighter/lighter}
+\directlua{
+  assert(lighter_backend_command ==
+    "lighter --custom-theme 'custom theme.toml' --config 'config file.toml'")
+}
+
+\begin{document}
+\begin{lighter}{text}
+alpha {one}
+\end{lighter}
+
+\begin{lighter}[2:]{text}
+excluded
+included
+\end{lighter}
+
+\inputlighter[:1]{text}{lighter/tests/integration.tex}
+
+Inline: \inlinelighter{text}{beta {two}}.
+\end{document}

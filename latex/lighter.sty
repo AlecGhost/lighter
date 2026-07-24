@@ -1,0 +1,121 @@
+\NeedsTeXFormat{LaTeX2e}
+\ProvidesPackage{lighter/lighter}[2026/07/23 Cached lighter syntax highlighting]
+
+\RequirePackage{kvoptions}
+\RequirePackage{fvextra}
+\RequirePackage{xparse}
+\RequirePackage{xcolor}
+\RequirePackage[normalem]{ulem}
+\RequirePackage{float}
+
+\makeatletter
+
+\SetupKeyvalOptions{family=lighter,prefix=lighter@}
+\DeclareStringOption[]{theme}
+\DeclareStringOption[]{config}
+\newcommand{\lighter@customtheme}{}
+\define@key{lighter}{custom-theme}{\renewcommand{\lighter@customtheme}{#1}}
+\ProcessKeyvalOptions*
+
+\ifdefined\directlua\else
+  \PackageError{lighter}{LuaLaTeX is required}
+    {Compile this document with LuaLaTeX.}
+\fi
+
+\newcounter{lighter@listing}
+\newwrite\lighter@sourcewrite
+\newcommand{\lighter@command}{lighter}
+\newcommand{\lighter@cachedirectory}{lighter-cache}
+
+\@ifundefined{c@listing}{%
+  \newfloat{listing}{tbp}{lol}%
+  \floatname{listing}{Listing}%
+}{}
+
+\directlua{
+  local module_path = kpse.find_file("lighter/lighter.lua")
+  if not module_path then
+    tex.error("lighter package error", {"Could not find lighter/lighter.lua."})
+  else
+    lighter_backend = dofile(module_path)
+    lighter_backend.ensure_directory(
+      "\luaescapestring{\lighter@cachedirectory}")
+    lighter_backend_command = lighter_backend.command_with_startup_options(
+      "\luaescapestring{\lighter@command}",
+      "\luaescapestring{\lighter@theme}",
+      "\luaescapestring{\lighter@customtheme}",
+      "\luaescapestring{\lighter@config}")
+  end
+}
+
+\newcommand{\lighter@nextfiles}{%
+  \stepcounter{lighter@listing}%
+  \edef\lighter@sourcefile{\jobname.lighter-\arabic{lighter@listing}.source}%
+  \edef\lighter@outputfile{%
+    \lighter@cachedirectory/\jobname.lighter-\arabic{lighter@listing}.tex}%
+}
+
+\newcommand{\lighter@highlight}[2]{%
+  \directlua{lighter_backend.highlight(
+    lighter_backend_command,
+    "\luaescapestring{#1}",
+    "\luaescapestring{\lighter@sourcefile}",
+    "\luaescapestring{\lighter@outputfile}",
+    "\luaescapestring{#2}")}%
+}
+
+\newcommand{\lighter@typeset}{%
+  \VerbatimInput[commandchars=\\\{\}]{\lighter@outputfile}%
+  \directlua{lighter_backend.remove("\luaescapestring{\lighter@sourcefile}")}%
+}
+
+\newenvironment{lighter}[2][]{%
+  \VerbatimEnvironment
+  \def\lighter@lines{#1}%
+  \def\lighter@language{#2}%
+  \lighter@nextfiles
+  \begin{VerbatimOut}{\lighter@sourcefile}%
+}{%
+  \end{VerbatimOut}%
+  \lighter@highlight{\lighter@language}{\lighter@lines}%
+  \lighter@typeset
+}
+
+\NewDocumentCommand{\inputlighter}{O{} m m}{%
+  \begingroup
+  \lighter@nextfiles
+  \edef\lighter@sourcefile{#3}%
+  \lighter@highlight{#2}{#1}%
+  \VerbatimInput[commandchars=\\\{\}]{\lighter@outputfile}%
+  \endgroup
+}
+
+\newcommand{\lighter@inlineinput}{%
+  \begingroup
+  \ttfamily
+  \endlinechar=-1
+  \let\do\@makeother
+  \dospecials
+  \catcode`\\=0
+  \catcode`\{=1
+  \catcode`\}=2
+  \obeyspaces
+  \input{\lighter@outputfile}%
+  \endgroup
+}
+
+\NewDocumentCommand{\inlinelighter}{m v}{%
+  \begingroup
+  \lighter@nextfiles
+  \immediate\openout\lighter@sourcewrite=\lighter@sourcefile
+  \immediate\write\lighter@sourcewrite{\unexpanded{#2}}%
+  \immediate\closeout\lighter@sourcewrite
+  \lighter@highlight{#1}{}%
+  \leavevmode
+  \lighter@inlineinput
+  \directlua{lighter_backend.remove("\luaescapestring{\lighter@sourcefile}")}%
+  \endgroup
+}
+
+\makeatother
+\endinput
