@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta
+      name="description"
+      content="A Lighter demo comparing Highlight.js, Arborium, and Lighter."
+    >
+    <title>Lighter demo — highlighter comparison</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="styles/arborium-base.css">
+    <link rel="stylesheet" href="styles/catppuccin-mocha.css">
+    <link rel="stylesheet" href="styles/highlightjs.css">
+    <link rel="stylesheet" href="styles/site.css">
+    <script src="vendor/highlight.min.js" defer></script>
+    <script src="app.js" defer></script>
+  </head>
+  <body>
+    <main>
+      <header class="site-header">
+        <div class="title-block">
+          <p class="product-name">Lighter demo</p>
+          <h1>Highlighter comparison</h1>
+          <p class="summary">
+            The same code rendered by Highlight.js, Arborium, and Lighter.
+          </p>
+        </div>
+        <div class="language-picker" aria-label="Choose a language">
+          <span class="picker-label">Language</span>
+          <div class="language-tabs" role="tablist" aria-label="Example language"></div>
+        </div>
+      </header>
+
+      <div class="demo-info">
+        <p>Lighter combines Arborium’s tree-sitter output with semantic tokens from a language server.</p>
+        <span id="status" role="status" aria-live="polite">Loading Rust…</span>
+      </div>
+
+      <section class="comparison" aria-label="Highlighter comparison">
+        <article class="column">
+          <header class="column-heading">
+            <h2>Highlight.js</h2>
+            <span class="column-kind">Regex-based modes</span>
+          </header>
+          <pre><code id="highlightjs-output" class="hljs"></code></pre>
+        </article>
+
+        <article class="column">
+          <header class="column-heading">
+            <h2>Arborium</h2>
+            <span class="column-kind">Tree-sitter</span>
+          </header>
+          <pre><code id="arborium-output"></code></pre>
+        </article>
+
+        <article class="column">
+          <header class="column-heading">
+            <h2>Lighter</h2>
+            <span class="column-kind">Tree-sitter + LSP</span>
+          </header>
+          <pre><code id="lighter-output"></code></pre>
+        </article>
+      </section>
+
+      <footer>
+        <p>
+          Semantic differences are easiest to see in imports, parameters,
+          properties, enum variants, types, and function calls.
+        </p>
+        <p id="source-path" class="source-path"></p>
+      </footer>
+    </main>
+  </body>
+</html>

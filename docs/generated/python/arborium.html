@@ -1,0 +1,35 @@
+<a-k>from</a-k> <a-v>collections</a-v>.<a-v>abc</a-v> <a-k>import</a-k> <a-cr>Iterable</a-cr>
+<a-k>from</a-k> <a-v>typing</a-v> <a-k>import</a-k> <a-cr>Final</a-cr>, <a-cr>TypeAlias</a-cr>
+
+<a-k>from</a-k> <a-v>models</a-v> <a-k>import</a-k> <a-cr>Priority</a-cr>, <a-cr>Task</a-cr>
+
+<a-cr>Tag</a-cr>: <a-t>TypeAlias</a-t> <a-o>=</a-o> <a-v>str</a-v>
+<a-co>OWNER</a-co>: <a-t>Final</a-t> <a-o>=</a-o> <a-s>&quot;Ada&quot;</a-s>
+
+
+<a-k>def</a-k> <a-f>summarize</a-f>(<a-vp>task</a-vp>: <a-t>Task</a-t>, <a-vp>tags</a-vp>: <a-cr>Iterable</a-cr>[<a-t>Tag</a-t>]) <a-o>-&gt;</a-o> <a-t>str</a-t>:
+    <a-s>&quot;&quot;&quot;Build a project-aware label for one task.&quot;&quot;&quot;</a-s>
+    <a-k>match</a-k> <a-v>task</a-v>.<a-pr>priority</a-pr>:
+        <a-k>case</a-k> <a-cr>Priority</a-cr>.<a-co>HIGH</a-co>:
+            <a-v>label</a-v> <a-o>=</a-o> <a-s>&quot;urgent&quot;</a-s>
+        <a-k>case</a-k> <a-cr>Priority</a-cr>.<a-co>LOW</a-co>:
+            <a-v>label</a-v> <a-o>=</a-o> <a-s>&quot;later&quot;</a-s>
+
+    <a-v>names</a-v> <a-o>=</a-o> <a-s>&quot;, &quot;</a-s>.<a-pr>join</a-pr>(<a-v>tag</a-v>.<a-pr>casefold</a-pr>() <a-k>for</a-k> <a-v>tag</a-v> <a-o>in</a-o> <a-v>tags</a-v> <a-k>if</a-k> <a-v>tag</a-v>)
+    <a-k>return</a-k> <a-s>f&quot;</a-s><a-p>{</a-p><a-co>OWNER</a-co><a-p>}</a-p><a-s>: </a-s><a-p>{</a-p><a-v>task</a-v><a-eb>.</a-eb><a-pr>title</a-pr><a-eb>!r</a-eb><a-p>}</a-p><a-s> · </a-s><a-p>{</a-p><a-v>label</a-v><a-p>}</a-p><a-s> · </a-s><a-p>{</a-p><a-v>names</a-v><a-p>}</a-p><a-s>&quot;</a-s>
+
+
+<a-k>def</a-k> <a-f>main</a-f>() <a-o>-&gt;</a-o> <a-co>None</a-co>:
+    <a-v>tasks</a-v> <a-o>=</a-o> {
+        <a-s>&quot;demo&quot;</a-s>: <a-f>Task</a-f>(
+            <a-vp>title</a-vp><a-o>=</a-o><a-s>&quot;Ship semantic colors&quot;</a-s>,
+            <a-vp>priority</a-vp><a-o>=</a-o><a-cr>Priority</a-cr>.<a-pr>HIGH</a-pr>,
+        )
+    }
+
+    <a-k>if</a-k> <a-v>selected</a-v> <a-o>:=</a-o> <a-v>tasks</a-v>.<a-pr>get</a-pr>(<a-s>&quot;demo&quot;</a-s>):
+        <a-f>print</a-f>(<a-f>summarize</a-f>(<a-v>selected</a-v>, [<a-s>&quot;LSP&quot;</a-s>, <a-s>&quot;Tree-sitter&quot;</a-s>]))
+
+
+<a-k>if</a-k> <a-v>__name__</a-v> <a-o>==</a-o> <a-s>&quot;__main__&quot;</a-s>:
+    <a-f>main</a-f>()

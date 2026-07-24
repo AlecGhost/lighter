@@ -1,0 +1,9 @@
+{
+  "name": "lighter-demo-typescript",
+  "private": true,
+  "version": "0.1.0",
+  "devDependencies": {
+    "typescript": "^6.0.0",
+    "typescript-language-server": "^5.1.3"
+  }
+}

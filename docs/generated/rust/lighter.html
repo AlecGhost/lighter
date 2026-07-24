@@ -1,0 +1,44 @@
+<a-k>mod</a-k> <a-ns>model</a-ns><a-p>;</a-p>
+
+<a-k>use</a-k> <a-ns>std</a-ns><a-o>::</a-o><a-ns>collections</a-ns><a-o>::</a-o><a-t>BTreeMap</a-t><a-p>;</a-p>
+
+<a-k>use</a-k> <a-ns>model</a-ns><a-o>::</a-o><a-p>{</a-p><a-t>Priority</a-t><a-p>,</a-p> <a-t>Task</a-t><a-p>};</a-p>
+
+<a-k>const</a-k> <a-cr>OWNER</a-cr><a-p>:</a-p> <a-o>&amp;</a-o><a-t>str</a-t> <a-o>=</a-o> <a-s>&quot;Ada&quot;</a-s><a-p>;</a-p>
+
+<a-k>fn</a-k> <a-f>summarize</a-f><a-p>&lt;</a-p><a-t>T</a-t><a-p>:</a-p> <a-t>AsRef</a-t><a-p>&lt;</a-p><a-t>str</a-t><a-p>&gt;&gt;(</a-p><a-vp>task</a-vp><a-p>:</a-p> <a-o>&amp;</a-o><a-t>Task</a-t><a-p>,</a-p> <a-vp>tags</a-vp><a-p>:</a-p> <a-o>&amp;</a-o><a-p>[</a-p><a-t>T</a-t><a-p>])</a-p> <a-o>-&gt;</a-o> <a-t>String</a-t> <a-p>{</a-p>
+    <a-k>let</a-k> <a-v>label</a-v> <a-o>=</a-o> <a-k>match</a-k> <a-vp>task</a-vp><a-o>.</a-o><a-pr>priority</a-pr> <a-p>{</a-p>
+        <a-t>Priority</a-t><a-o>::</a-o><a-ev>High</a-ev> <a-o>=&gt;</a-o> <a-s>&quot;urgent&quot;</a-s><a-p>,</a-p>
+        <a-t>Priority</a-t><a-o>::</a-o><a-ev>Low</a-ev> <a-o>=&gt;</a-o> <a-s>&quot;later&quot;</a-s><a-p>,</a-p>
+    <a-p>};</a-p>
+    <a-k>let</a-k> <a-v>names</a-v> <a-o>=</a-o> <a-vp>tags</a-vp>
+        <a-o>.</a-o><a-f>iter</a-f><a-p>()</a-p>
+        <a-o>.</a-o><a-f>map</a-f><a-p>(</a-p><a-t>AsRef</a-t><a-o>::</a-o><a-f>as_ref</a-f><a-p>)</a-p>
+        <a-o>.</a-o><a-f>collect</a-f><a-o>::</a-o><a-p>&lt;</a-p><a-t>Vec</a-t><a-p>&lt;</a-p><a-t>_</a-t><a-p>&gt;&gt;()</a-p>
+        <a-o>.</a-o><a-f>join</a-f><a-p>(</a-p><a-s>&quot;, &quot;</a-s><a-p>);</a-p>
+
+    <a-m>format!</a-m><a-p>(</a-p><a-s>&quot;{</a-s><a-v>OWNER</a-v><a-s>}</a-s><a-s>: </a-s><a-s>{</a-s><a-v>task</a-v><a-s>}</a-s><a-s> · </a-s><a-s>{</a-s><a-v>label</a-v><a-s>}</a-s><a-s> · </a-s><a-s>{</a-s><a-v>names</a-v><a-s>}</a-s><a-s>&quot;</a-s><a-p>)</a-p>
+<a-p>}</a-p>
+
+<a-k>fn</a-k> <a-f>main</a-f><a-p>()</a-p> <a-p>{</a-p>
+    <a-k>let</a-k> <a-v>tasks</a-v> <a-o>=</a-o> <a-t>BTreeMap</a-t><a-o>::</a-o><a-f>from</a-f><a-p>([</a-p>
+        <a-p>(</a-p>
+            <a-s>&quot;backlog&quot;</a-s><a-p>,</a-p>
+            <a-t>Task</a-t> <a-p>{</a-p>
+                <a-pr>title</a-pr><a-p>:</a-p> <a-t>String</a-t><a-o>::</a-o><a-f>from</a-f><a-p>(</a-p><a-s>&quot;Tune syntax colors&quot;</a-s><a-p>),</a-p>
+                <a-pr>priority</a-pr><a-p>:</a-p> <a-t>Priority</a-t><a-o>::</a-o><a-ev>Low</a-ev><a-p>,</a-p>
+            <a-p>},</a-p>
+        <a-p>),</a-p>
+        <a-p>(</a-p>
+            <a-s>&quot;demo&quot;</a-s><a-p>,</a-p>
+            <a-t>Task</a-t> <a-p>{</a-p>
+                <a-pr>title</a-pr><a-p>:</a-p> <a-t>String</a-t><a-o>::</a-o><a-f>from</a-f><a-p>(</a-p><a-s>&quot;Ship semantic colors&quot;</a-s><a-p>),</a-p>
+                <a-pr>priority</a-pr><a-p>:</a-p> <a-t>Priority</a-t><a-o>::</a-o><a-ev>High</a-ev><a-p>,</a-p>
+            <a-p>},</a-p>
+        <a-p>),</a-p>
+    <a-p>]);</a-p>
+
+    <a-k>if</a-k> <a-k>let</a-k> <a-ev>Some</a-ev><a-p>(</a-p><a-v>selected</a-v><a-p>)</a-p> <a-o>=</a-o> <a-v>tasks</a-v><a-o>.</a-o><a-f>get</a-f><a-p>(</a-p><a-s>&quot;demo&quot;</a-s><a-p>)</a-p> <a-p>{</a-p>
+        <a-m>println!</a-m><a-p>(</a-p><a-s>&quot;{}&quot;</a-s><a-p>,</a-p> <a-f>summarize</a-f><a-p>(</a-p><a-v>selected</a-v><a-p>,</a-p> <a-o>&amp;</a-o><a-p>[</a-p><a-s>&quot;lsp&quot;</a-s><a-p>,</a-p> <a-s>&quot;tree-sitter&quot;</a-s><a-p>]));</a-p>
+    <a-p>}</a-p>
+<a-p>}</a-p>
