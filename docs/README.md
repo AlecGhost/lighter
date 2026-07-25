@@ -1,7 +1,8 @@
 # Highlighter comparison demo
 
 This directory is a dependency-free GitHub Pages site. It compares the same
-source with Highlight.js, Arborium, and Lighter for Rust, Python, and TypeScript.
+source with Highlight.js, Arborium, and Lighter for Rust, Python, and TypeScript
+using an interactive scrubber.
 The vendored Highlight.js 11.11.1 browser bundle retains its BSD-3-Clause
 license header.
 
