@@ -11,8 +11,13 @@ HTML fragments from the repository root:
 
 ```sh
 npm install --prefix docs/projects/typescript
+uv sync --project docs/projects/python
+docs/scripts/format.sh
 docs/scripts/generate.sh
 ```
+
+Each fixture's formatter wraps at 50 columns so the comparison remains useful
+on smaller screens.
 
 Then serve `docs/` from any static file server, or configure GitHub Pages to
 publish from the `docs` directory.

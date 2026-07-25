@@ -3,7 +3,10 @@ import { Priority, type Task } from "./models.js";
 type Tag = `#${string}`;
 const OWNER = "Ada" as const;
 
-function summarize<T extends Tag>(task: Task, tags: readonly T[]): string {
+function summarize<T extends Tag>(
+  task: Task,
+  tags: readonly T[],
+): string {
   const label = (() => {
     switch (task.priority) {
       case Priority.High:
@@ -12,9 +15,12 @@ function summarize<T extends Tag>(task: Task, tags: readonly T[]): string {
         return "later";
     }
   })();
-  const names = tags.map((tag) => tag.toLocaleLowerCase()).join(", ");
+  const names = tags
+    .map((tag) => tag.toLocaleLowerCase())
+    .join(", ");
 
-  return `${OWNER}: ${task.title} · ${label} · ${names}`;
+  const prefix = `${OWNER}: ${task.title}`;
+  return `${prefix} · ${label} · ${names}`;
 }
 
 async function main(): Promise<void> {
@@ -30,7 +36,14 @@ async function main(): Promise<void> {
   const selected = tasks.get("demo");
 
   if (selected) {
-    await Promise.resolve(console.log(summarize(selected, ["#LSP", "#TreeSitter"])));
+    await Promise.resolve(
+      console.log(
+        summarize(selected, [
+          "#LSP",
+          "#TreeSitter",
+        ]),
+      ),
+    );
   }
 }
 

@@ -3,6 +3,13 @@ name = "lighter-demo-python"
 version = "0.1.0"
 requires-python = ">=3.12"
 
+[dependency-groups]
+dev = ["black>=26.5.1"]
+
 [tool.basedpyright]
 include = ["src"]
 typeCheckingMode = "strict"
+
+[tool.black]
+line-length = 50
+target-version = ["py312"]

@@ -7,16 +7,21 @@ Tag: TypeAlias = str
 OWNER: Final = "Ada"
 
 
-def summarize(task: Task, tags: Iterable[Tag]) -> str:
-    """Build a project-aware label for one task."""
+def summarize(
+    task: Task, tags: Iterable[Tag]
+) -> str:
+    """Build a label for one project task."""
     match task.priority:
         case Priority.HIGH:
             label = "urgent"
         case Priority.LOW:
             label = "later"
 
-    names = ", ".join(tag.casefold() for tag in tags if tag)
-    return f"{OWNER}: {task.title!r} · {label} · {names}"
+    names = ", ".join(
+        tag.casefold() for tag in tags if tag
+    )
+    prefix = f"{OWNER}: {task.title!r}"
+    return f"{prefix} · {label} · {names}"
 
 
 def main() -> None:
@@ -28,7 +33,11 @@ def main() -> None:
     }
 
     if selected := tasks.get("demo"):
-        print(summarize(selected, ["LSP", "Tree-sitter"]))
+        print(
+            summarize(
+                selected, ["LSP", "Tree-sitter"]
+            )
+        )
 
 
 if __name__ == "__main__":

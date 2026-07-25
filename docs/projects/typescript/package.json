@@ -2,8 +2,16 @@
   "name": "lighter-demo-typescript",
   "private": true,
   "version": "0.1.0",
+  "scripts": {
+    "format": "prettier --write src",
+    "format:check": "prettier --check src"
+  },
   "devDependencies": {
+    "prettier": "^3.9.6",
     "typescript": "^6.0.0",
     "typescript-language-server": "^5.1.3"
+  },
+  "prettier": {
+    "printWidth": 50
   }
 }

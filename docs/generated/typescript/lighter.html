@@ -3,7 +3,10 @@
 <a-k>type</a-k> <a-t>Tag</a-t> <a-o>=</a-o> `#${<a-t>string</a-t><a-p>}</a-p>`<a-p>;</a-p>
 <a-k>const</a-k> <a-t>OWNER</a-t> <a-o>=</a-o> <a-s>&quot;Ada&quot;</a-s> <a-k>as</a-k> <a-t>const</a-t><a-p>;</a-p>
 
-<a-k>function</a-k> <a-f>summarize</a-f><a-o>&lt;</a-o><a-t>T</a-t> <a-k>extends</a-k> <a-t>Tag</a-t><a-o>&gt;</a-o><a-p>(</a-p><a-vp>task</a-vp>: <a-t>Task</a-t><a-p>,</a-p> <a-vp>tags</a-vp>: <a-k>readonly</a-k> <a-t>T</a-t><a-p>[])</a-p>: <a-t>string</a-t> <a-p>{</a-p>
+<a-k>function</a-k> <a-f>summarize</a-f><a-o>&lt;</a-o><a-t>T</a-t> <a-k>extends</a-k> <a-t>Tag</a-t><a-o>&gt;</a-o><a-p>(</a-p>
+  <a-vp>task</a-vp>: <a-t>Task</a-t><a-p>,</a-p>
+  <a-vp>tags</a-vp>: <a-k>readonly</a-k> <a-t>T</a-t><a-p>[],</a-p>
+<a-p>)</a-p>: <a-t>string</a-t> <a-p>{</a-p>
   <a-k>const</a-k> <a-v>label</a-v> <a-o>=</a-o> <a-p>(()</a-p> <a-o>=&gt;</a-o> <a-p>{</a-p>
     <a-k>switch</a-k> <a-p>(</a-p><a-vp>task</a-vp><a-p>.</a-p><a-pr>priority</a-pr><a-p>)</a-p> <a-p>{</a-p>
       <a-k>case</a-k> <a-t>Priority</a-t><a-p>.</a-p><a-ev>High</a-ev>:
@@ -12,9 +15,12 @@
         <a-k>return</a-k> <a-s>&quot;later&quot;</a-s><a-p>;</a-p>
     <a-p>}</a-p>
   <a-p>})();</a-p>
-  <a-k>const</a-k> <a-v>names</a-v> <a-o>=</a-o> <a-vp>tags</a-vp><a-p>.</a-p><a-f>map</a-f><a-p>((</a-p><a-vp>tag</a-vp><a-p>)</a-p> <a-o>=&gt;</a-o> <a-vp>tag</a-vp><a-p>.</a-p><a-f>toLocaleLowerCase</a-f><a-p>()).</a-p><a-f>join</a-f><a-p>(</a-p><a-s>&quot;, &quot;</a-s><a-p>);</a-p>
+  <a-k>const</a-k> <a-v>names</a-v> <a-o>=</a-o> <a-vp>tags</a-vp>
+    <a-p>.</a-p><a-f>map</a-f><a-p>((</a-p><a-vp>tag</a-vp><a-p>)</a-p> <a-o>=&gt;</a-o> <a-vp>tag</a-vp><a-p>.</a-p><a-f>toLocaleLowerCase</a-f><a-p>())</a-p>
+    <a-p>.</a-p><a-f>join</a-f><a-p>(</a-p><a-s>&quot;, &quot;</a-s><a-p>);</a-p>
 
-  <a-k>return</a-k> <a-s>`</a-s><a-p>${</a-p><a-t>OWNER</a-t><a-p>}</a-p><a-s>: </a-s><a-p>${</a-p><a-vp>task</a-vp><a-p>.</a-p><a-pr>title</a-pr><a-p>}</a-p><a-s> · </a-s><a-p>${</a-p><a-v>label</a-v><a-p>}</a-p><a-s> · </a-s><a-p>${</a-p><a-v>names</a-v><a-p>}</a-p><a-s>`</a-s><a-p>;</a-p>
+  <a-k>const</a-k> <a-v>prefix</a-v> <a-o>=</a-o> <a-s>`</a-s><a-p>${</a-p><a-t>OWNER</a-t><a-p>}</a-p><a-s>: </a-s><a-p>${</a-p><a-vp>task</a-vp><a-p>.</a-p><a-pr>title</a-pr><a-p>}</a-p><a-s>`</a-s><a-p>;</a-p>
+  <a-k>return</a-k> <a-s>`</a-s><a-p>${</a-p><a-v>prefix</a-v><a-p>}</a-p><a-s> · </a-s><a-p>${</a-p><a-v>label</a-v><a-p>}</a-p><a-s> · </a-s><a-p>${</a-p><a-v>names</a-v><a-p>}</a-p><a-s>`</a-s><a-p>;</a-p>
 <a-p>}</a-p>
 
 <a-k>async</a-k> <a-k>function</a-k> <a-f>main</a-f><a-p>()</a-p>: <a-t>Promise</a-t><a-p>&lt;</a-p><a-t>void</a-t><a-p>&gt;</a-p> <a-p>{</a-p>
@@ -30,7 +36,14 @@
   <a-k>const</a-k> <a-v>selected</a-v> <a-o>=</a-o> <a-v>tasks</a-v><a-p>.</a-p><a-f>get</a-f><a-p>(</a-p><a-s>&quot;demo&quot;</a-s><a-p>);</a-p>
 
   <a-k>if</a-k> <a-p>(</a-p><a-v>selected</a-v><a-p>)</a-p> <a-p>{</a-p>
-    <a-k>await</a-k> <a-t>Promise</a-t><a-p>.</a-p><a-f>resolve</a-f><a-p>(</a-p><a-v>console</a-v><a-p>.</a-p><a-f>log</a-f><a-p>(</a-p><a-f>summarize</a-f><a-p>(</a-p><a-v>selected</a-v><a-p>,</a-p> <a-p>[</a-p><a-s>&quot;#LSP&quot;</a-s><a-p>,</a-p> <a-s>&quot;#TreeSitter&quot;</a-s><a-p>])));</a-p>
+    <a-k>await</a-k> <a-t>Promise</a-t><a-p>.</a-p><a-f>resolve</a-f><a-p>(</a-p>
+      <a-v>console</a-v><a-p>.</a-p><a-f>log</a-f><a-p>(</a-p>
+        <a-f>summarize</a-f><a-p>(</a-p><a-v>selected</a-v><a-p>,</a-p> <a-p>[</a-p>
+          <a-s>&quot;#LSP&quot;</a-s><a-p>,</a-p>
+          <a-s>&quot;#TreeSitter&quot;</a-s><a-p>,</a-p>
+        <a-p>]),</a-p>
+      <a-p>),</a-p>
+    <a-p>);</a-p>
   <a-p>}</a-p>
 <a-p>}</a-p>
 

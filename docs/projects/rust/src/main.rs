@@ -6,7 +6,10 @@ use model::{Priority, Task};
 
 const OWNER: &str = "Ada";
 
-fn summarize<T: AsRef<str>>(task: &Task, tags: &[T]) -> String {
+fn summarize<T: AsRef<str>>(
+    task: &Task,
+    tags: &[T],
+) -> String {
     let label = match task.priority {
         Priority::High => "urgent",
         Priority::Low => "later",
@@ -17,7 +20,8 @@ fn summarize<T: AsRef<str>>(task: &Task, tags: &[T]) -> String {
         .collect::<Vec<_>>()
         .join(", ");
 
-    format!("{OWNER}: {task} · {label} · {names}")
+    let prefix = format!("{OWNER}: {task}");
+    format!("{prefix} · {label} · {names}")
 }
 
 fn main() {
@@ -25,20 +29,30 @@ fn main() {
         (
             "backlog",
             Task {
-                title: String::from("Tune syntax colors"),
+                title: String::from(
+                    "Tune syntax colors",
+                ),
                 priority: Priority::Low,
             },
         ),
         (
             "demo",
             Task {
-                title: String::from("Ship semantic colors"),
+                title: String::from(
+                    "Ship semantic colors",
+                ),
                 priority: Priority::High,
             },
         ),
     ]);
 
     if let Some(selected) = tasks.get("demo") {
-        println!("{}", summarize(selected, &["lsp", "tree-sitter"]));
+        println!(
+            "{}",
+            summarize(
+                selected,
+                &["lsp", "tree-sitter"]
+            )
+        );
     }
 }
