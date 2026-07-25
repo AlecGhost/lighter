@@ -4,59 +4,115 @@
 }
 
 .hljs-comment,
-.hljs-quote {
-  color: #6c7086;
+.hljs-doctag {
+  color: var(--arb-c-dark);
   font-style: italic;
 }
 
-.hljs-keyword,
-.hljs-selector-tag,
-.hljs-literal,
-.hljs-section,
-.hljs-link {
-  color: #cba6f7;
+.hljs-keyword {
+  color: var(--arb-k-dark);
 }
 
 .hljs-string,
-.hljs-title,
-.hljs-name,
-.hljs-type,
-.hljs-attribute,
-.hljs-symbol,
-.hljs-bullet,
-.hljs-addition,
-.hljs-variable,
-.hljs-template-tag,
-.hljs-template-variable {
-  color: #a6e3a1;
+.hljs-template-tag {
+  color: var(--arb-s-dark);
 }
 
-.hljs-number,
-.hljs-meta,
+.hljs-char.escape {
+  color: var(--arb-se-dark);
+}
+
+.hljs-regexp {
+  color: var(--arb-rx-dark);
+}
+
+.hljs-type,
 .hljs-built_in,
 .hljs-builtin-name,
-.hljs-params {
-  color: #fab387;
+.hljs-title.class_ {
+  color: var(--arb-t-dark);
 }
 
-.hljs-title.function_,
-.hljs-title.class_ {
-  color: #89b4fa;
+.hljs-title.function_ {
+  color: var(--arb-f-dark);
 }
 
 .hljs-attr,
-.hljs-property {
-  color: #89dceb;
+.hljs-attribute {
+  color: var(--arb-at-dark);
 }
 
-.hljs-regexp,
+.hljs-property,
+.hljs-selector-class,
+.hljs-selector-id,
+.hljs-selector-pseudo {
+  color: var(--arb-pr-dark);
+}
+
+.hljs-selector-tag,
+.hljs-name,
+.hljs-tag {
+  color: var(--arb-tg-dark);
+}
+
+.hljs-variable,
+.hljs-template-variable,
+.hljs-subst {
+  color: var(--arb-v-dark);
+}
+
+.hljs-variable.language_ {
+  color: var(--arb-vb-dark);
+}
+
+.hljs-params {
+  color: var(--arb-vp-dark);
+}
+
+.hljs-literal,
+.hljs-symbol,
+.hljs-variable.constant_ {
+  color: var(--arb-co-dark);
+}
+
+.hljs-number {
+  color: var(--arb-n-dark);
+}
+
+.hljs-operator {
+  color: var(--arb-o-dark);
+}
+
+.hljs-punctuation,
+.hljs-bullet,
+.hljs-quote {
+  color: var(--arb-p-dark);
+}
+
+.hljs-meta {
+  color: var(--arb-m-dark);
+}
+
+.hljs-section,
+.hljs-title {
+  color: var(--arb-tt-dark);
+}
+
+.hljs-link {
+  color: var(--arb-tu-dark);
+}
+
+.hljs-code,
+.hljs-formula {
+  color: var(--arb-tl-dark);
+}
+
+.hljs-addition {
+  color: var(--arb-s-dark);
+}
+
 .hljs-deletion {
-  color: #f38ba8;
-}
-
-.hljs-operator,
-.hljs-punctuation {
-  color: #94e2d5;
+  color: var(--arb-ss-dark);
 }
 
 .hljs-emphasis {
