@@ -73,6 +73,13 @@ pub type LangCaptureMapping = HashMap<LangName, CaptureMapping>;
 pub type Commands = HashMap<LangName, CommandEntry>;
 pub type ServerConfiguration = Value;
 pub type Result<T> = std::result::Result<T, Error>;
+type DefaultCommand = (
+    &'static str,
+    &'static str,
+    &'static [&'static str],
+    Value,
+    &'static [(&'static str, &'static str)],
+);
 
 /// A single LSP server entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -99,58 +106,101 @@ impl CommandEntry {
     }
 }
 
-/// Default commands for language servers that provide full-document semantic tokens.
-pub fn default_commands() -> Commands {
-    let entries: [(&str, &str, &[&str], Value); _] = [
-        ("rust", "rust-analyzer", &[], json!({})),
-        ("python", "basedpyright-langserver", &["--stdio"], json!({})),
+/// Default commands and language-specific capture mappings for language servers
+/// that provide full-document semantic tokens.
+pub fn default_commands() -> (Commands, LangCaptureMapping) {
+    let entries: [DefaultCommand; _] = [
+        (
+            "rust",
+            "rust-analyzer",
+            &[],
+            json!({}),
+            &[("const", "constant"), ("decorator", "constant")],
+        ),
+        (
+            "python",
+            "basedpyright-langserver",
+            &["--stdio"],
+            json!({}),
+            &[("type.parameter", "variable.parameter")],
+        ),
         (
             "typescript",
             "typescript-language-server",
             &["--stdio"],
             json!({}),
+            &[],
         ),
         (
             "javascript",
             "typescript-language-server",
             &["--stdio"],
             json!({}),
+            &[],
         ),
-        ("tsx", "typescript-language-server", &["--stdio"], json!({})),
-        ("jsx", "typescript-language-server", &["--stdio"], json!({})),
-        ("c", "clangd", &[], json!({})),
-        ("cpp", "clangd", &[], json!({})),
-        ("java", "jdtls", &[], json!({})),
-        ("lua", "lua-language-server", &[], json!({})),
-        ("zig", "zls", &[], json!({})),
-        ("ruby", "ruby-lsp", &[], json!({})),
-        ("kotlin", "kotlin-lsp", &[], json!({})),
-        ("swift", "sourcekit-lsp", &[], json!({})),
+        (
+            "tsx",
+            "typescript-language-server",
+            &["--stdio"],
+            json!({}),
+            &[],
+        ),
+        (
+            "jsx",
+            "typescript-language-server",
+            &["--stdio"],
+            json!({}),
+            &[],
+        ),
+        ("c", "clangd", &[], json!({}), &[]),
+        ("cpp", "clangd", &[], json!({}), &[]),
+        ("java", "jdtls", &[], json!({}), &[]),
+        ("lua", "lua-language-server", &[], json!({}), &[]),
+        ("zig", "zls", &[], json!({}), &[]),
+        ("ruby", "ruby-lsp", &[], json!({}), &[]),
+        ("kotlin", "kotlin-lsp", &[], json!({}), &[]),
+        ("swift", "sourcekit-lsp", &[], json!({}), &[]),
         (
             "haskell",
             "haskell-language-server-wrapper",
             &["--lsp"],
             json!({}),
+            &[],
         ),
-        ("ocaml", "ocamllsp", &[], json!({})),
-        ("dart", "dart", &["language-server"], json!({})),
+        ("ocaml", "ocamllsp", &[], json!({}), &[]),
+        ("dart", "dart", &["language-server"], json!({}), &[]),
         (
             "go",
             "gopls",
             &[],
             json!({ ("gopls"): { "semanticTokens": true } }),
+            &[],
         ),
     ];
+    let entry_count = entries.len();
 
-    entries
-        .into_iter()
-        .map(|(language, command, args, configuration)| {
-            (
-                LangName::from(language),
+    entries.into_iter().fold(
+        (
+            Commands::with_capacity(entry_count),
+            LangCaptureMapping::with_capacity(entry_count),
+        ),
+        |(mut commands, mut lang_mapping),
+         (language, command, args, configuration, capture_mapping)| {
+            let language = LangName::from(language);
+            commands.insert(
+                language.clone(),
                 CommandEntry::new(command, args, configuration),
-            )
-        })
-        .collect()
+            );
+            lang_mapping.insert(
+                language,
+                capture_mapping
+                    .iter()
+                    .map(|(token, capture)| ((*token).to_owned(), (*capture).to_owned()))
+                    .collect(),
+            );
+            (commands, lang_mapping)
+        },
+    )
 }
 
 #[derive(Debug)]
@@ -182,11 +232,12 @@ impl ServerKey {
 
 impl Default for ServerRegistry {
     fn default() -> Self {
+        let (commands, lang_mapping) = default_commands();
         Self {
-            commands: default_commands(),
+            commands,
             clients: HashMap::new(),
             general_mapping: HashMap::new(),
-            lang_mapping: HashMap::new(),
+            lang_mapping,
             log: LogLevel::default(),
         }
     }
@@ -788,6 +839,18 @@ mod tests {
             range: None,
             full,
         }
+    }
+
+    #[test]
+    fn default_commands_include_capture_mappings_for_every_language() {
+        let (commands, lang_mapping) = default_commands();
+
+        assert_eq!(commands.len(), lang_mapping.len());
+        assert!(
+            commands
+                .keys()
+                .all(|language| lang_mapping.contains_key(language))
+        );
     }
 
     #[test]

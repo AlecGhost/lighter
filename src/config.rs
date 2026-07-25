@@ -105,10 +105,9 @@ impl Config {
                 ))
             })
             .collect::<Result<Vec<_>>>()?;
-        let mut commands = lsp::default_commands();
+        let (mut commands, mut lang_mapping) = lsp::default_commands();
         commands.extend(configured_commands);
         let mut general_mapping = lsp::CaptureMapping::with_capacity(captures.len());
-        let mut lang_mapping = lsp::LangCaptureMapping::with_capacity(captures.len());
         captures
             .into_iter()
             .for_each(|(capture, mapping)| match mapping {
@@ -116,7 +115,10 @@ impl Config {
                     general_mapping.insert(capture, mapping);
                 }
                 CaptureMapping::Language(mapping) => {
-                    lang_mapping.insert(LangName::from(capture), mapping);
+                    lang_mapping
+                        .entry(LangName::from(capture))
+                        .or_default()
+                        .extend(mapping);
                 }
             });
         Ok(Self {
@@ -159,6 +161,56 @@ mod tests {
     fn config_from_source(source: &str) -> Result<Config> {
         let file = config_file(source);
         Config::load(Some(file.path()))
+    }
+
+    #[test]
+    fn loads_default_language_capture_mappings_without_config() {
+        const RUST_LANGUAGE: &str = "rust";
+        const RUST_TOKEN: &str = "const";
+        const RUST_CAPTURE: &str = "constant";
+        const PYTHON_LANGUAGE: &str = "python";
+        const PYTHON_TOKEN: &str = "type.parameter";
+        const PYTHON_CAPTURE: &str = "variable.parameter";
+        let config = Config::load(None).unwrap();
+
+        assert_eq!(
+            config
+                .lang_mapping
+                .get(RUST_LANGUAGE)
+                .unwrap()
+                .get(RUST_TOKEN)
+                .unwrap(),
+            RUST_CAPTURE
+        );
+        assert_eq!(
+            config
+                .lang_mapping
+                .get(PYTHON_LANGUAGE)
+                .unwrap()
+                .get(PYTHON_TOKEN)
+                .unwrap(),
+            PYTHON_CAPTURE
+        );
+    }
+
+    #[test]
+    fn configured_language_capture_mappings_extend_defaults() {
+        const LANGUAGE: &str = "rust";
+        const DEFAULT_TOKEN: &str = "const";
+        const DEFAULT_CAPTURE: &str = "constant";
+        const CONFIGURED_TOKEN: &str = "decorator";
+        const CONFIGURED_CAPTURE: &str = "attribute";
+        let config = config_from_source(&format!(
+            r#"
+    [captures.{LANGUAGE}]
+    {CONFIGURED_TOKEN} = "{CONFIGURED_CAPTURE}"
+    "#,
+        ))
+        .unwrap();
+        let mapping = config.lang_mapping.get(LANGUAGE).unwrap();
+
+        assert_eq!(mapping.get(DEFAULT_TOKEN).unwrap(), DEFAULT_CAPTURE);
+        assert_eq!(mapping.get(CONFIGURED_TOKEN).unwrap(), CONFIGURED_CAPTURE);
     }
 
     #[test]
