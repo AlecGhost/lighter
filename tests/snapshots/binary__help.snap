@@ -1,0 +1,65 @@
+---
+source: tests/binary.rs
+expression: snapshot(&output)
+---
+exit: 0
+--- stdout ---
+Usage: lighter [OPTIONS] [FILE]
+       lighter <COMMAND>
+
+Commands:
+  daemon  Manage the background highlighting daemon
+  help    Print this message or the help of the given subcommand(s)
+
+Arguments:
+  [FILE]
+          Source file to highlight (reads stdin when omitted)
+
+Options:
+  -p, --project <DIR>
+          Project directory exposed to the language server as its workspace
+
+  -l, --lang <LANG>
+          Language name (e.g. "rust", "python"). Inferred from file extension if a file path is provided
+
+  -c, --config <CONFIG>
+          Path to a TOML config file
+
+      --theme <THEME>
+          Name of a built-in Arborium theme
+          
+          [possible values: Alabaster, "Ayu Dark", "Ayu Light", "Catppuccin Frappé", "Catppuccin Latte", "Catppuccin Macchiato", "Catppuccin Mocha", Cobalt2, Dayfox, Desert256, Dracula, "EF Melissa Dark", "Evergarden Fall", "GitHub Dark", "GitHub Light", "Gruvbox Dark", "Gruvbox Light", "Kanagawa Dragon", "Light Owl", "Lucius Light", "Melange Dark", "Melange Light", Monokai, Nord, "One Dark", "Rosé Pine Moon", "Rustdoc Ayu", "Rustdoc Dark", "Rustdoc Light", "Solarized Dark", "Solarized Light", "Tokyo Night", Zenburn]
+
+      --custom-theme <CUSTOM_THEME>
+          Path to a custom TOML theme file
+
+  -f, --format <FORMAT>
+          Output highlighted ANSI, HTML, or LaTeX
+
+          Possible values:
+          - ansi
+          - html
+          - latex: LaTeX commands intended for an `xcolor`-enabled fvextra `Verbatim` environment using `commandchars=\\\{\}`
+
+      --log <LOG>
+          Set stderr logging verbosity
+          
+          [possible values: ERROR, WARN, INFO, DEBUG]
+
+      --lines <RANGE>
+          Inclusive, one-based line range to output (start:end, :end, or start:)
+
+      --no-lsp
+          Disable LSP semantic highlighting
+
+      --no-tree-sitter
+          Disable tree-sitter syntax highlighting
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+  -V, --version
+          Print version
+<EOF>
+--- stderr ---
+<EOF>

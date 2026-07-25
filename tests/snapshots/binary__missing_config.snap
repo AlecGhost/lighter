@@ -1,0 +1,10 @@
+---
+source: tests/binary.rs
+expression: snapshot(&config)
+---
+exit: 1
+--- stdout ---
+<EOF>
+--- stderr ---
+Failed to read config file 'tests/demo-projects/missing-config.toml'
+<EOF>

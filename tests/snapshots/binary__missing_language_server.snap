@@ -1,0 +1,10 @@
+---
+source: tests/binary.rs
+expression: snapshot(&output)
+---
+exit: 1
+--- stdout ---
+<EOF>
+--- stderr ---
+Failed to start server for lighter-language-server-does-not-exist: No such file or directory (os error 2)
+<EOF>

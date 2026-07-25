@@ -1,0 +1,16 @@
+---
+source: tests/semantic_highlighting.rs
+expression: rendered
+---
+<a-k>package</a-k> <a-ns>main</a-ns>
+
+<a-k>import</a-k> (
+	&quot;<a-ns>fmt</a-ns>&quot;
+
+	&quot;example.com/lighter-demo/<a-ns>message</a-ns>&quot;
+)
+
+<a-k>func</a-k> <a-f>main</a-f>() {
+	<a-v>greeter</a-v> <a-o>:=</a-o> <a-ns>message</a-ns>.<a-t>Greeter</a-t>{<a-pr>Prefix</a-pr>: <a-s>&quot;Hello&quot;</a-s>}
+	<a-ns>fmt</a-ns>.<a-f>Println</a-f>(<a-v>greeter</a-v>.<a-f>Welcome</a-f>(<a-s>&quot;Ada&quot;</a-s>))
+}

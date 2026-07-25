@@ -1,0 +1,12 @@
+---
+source: tests/binary.rs
+expression: snapshot(&invalid_range)
+---
+exit: 2
+--- stdout ---
+<EOF>
+--- stderr ---
+error: invalid value '3:2' for '--lines <RANGE>': expected a one-based line range: start:end, :end, or start:
+
+For more information, try '--help'.
+<EOF>

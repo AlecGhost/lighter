@@ -1,0 +1,10 @@
+---
+source: tests/binary.rs
+expression: snapshot(&missing_source)
+---
+exit: 1
+--- stdout ---
+<EOF>
+--- stderr ---
+Failed to read source file 'tests/demo-projects/rust/src/missing.rs'
+<EOF>

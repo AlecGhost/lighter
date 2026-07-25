@@ -1,0 +1,9 @@
+---
+source: tests/binary.rs
+expression: snapshot(&detected)
+---
+exit: 0
+--- stdout ---
+<a-k>use</a-k> lighter_rust_demo<a-p>::</a-p><a-cr>Greeter</a-cr><a-p>;</a-p><EOF>
+--- stderr ---
+<EOF>

@@ -1,0 +1,14 @@
+---
+source: tests/binary.rs
+expression: snapshot(&conflicting)
+---
+exit: 2
+--- stdout ---
+<EOF>
+--- stderr ---
+error: unexpected argument 'tests/demo-projects/rust/src/main.rs' found
+
+Usage: lighter daemon spawn [OPTIONS]
+
+For more information, try '--help'.
+<EOF>

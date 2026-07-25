@@ -1,0 +1,10 @@
+---
+source: tests/binary.rs
+expression: snapshot(&output)
+---
+exit: 1
+--- stdout ---
+<EOF>
+--- stderr ---
+Could not detect language. Specify it with --lang flag.
+<EOF>

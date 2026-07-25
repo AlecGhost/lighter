@@ -1,0 +1,12 @@
+---
+source: tests/semantic_highlighting.rs
+expression: rendered
+---
+from <a-ns>models</a-ns> import <a-t>User</a-t>
+
+
+def <a-f>welcome</a-f>(<a-v>user</a-v>: <a-t>User</a-t>) -&gt; <a-t>str</a-t>:
+    return <a-v>user</a-v>.<a-f>greeting</a-f>(&quot;Hello&quot;)
+
+
+<a-f>print</a-f>(<a-f>welcome</a-f>(<a-t>User</a-t>(&quot;Ada&quot;)))

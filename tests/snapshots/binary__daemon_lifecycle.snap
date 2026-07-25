@@ -1,0 +1,35 @@
+---
+source: tests/binary.rs
+expression: "format!(\"spawn:\\n{}\\ndefault request:\\n{}\\noverridden request:\\n{}\\nkill:\\n{}\\nsecond kill:\\n{}\",\nsnapshot(&spawn), snapshot(&default_format), snapshot(&request_override),\nsnapshot(&kill), snapshot(&second_kill),)"
+---
+spawn:
+exit: 0
+--- stdout ---
+<EOF>
+--- stderr ---
+<EOF>
+default request:
+exit: 0
+--- stdout ---
+&lt;daemon default&gt;<EOF>
+--- stderr ---
+<EOF>
+overridden request:
+exit: 0
+--- stdout ---
+\\override\{works\}<EOF>
+--- stderr ---
+<EOF>
+kill:
+exit: 0
+--- stdout ---
+<EOF>
+--- stderr ---
+<EOF>
+second kill:
+exit: 1
+--- stdout ---
+<EOF>
+--- stderr ---
+Daemon is not running
+<EOF>

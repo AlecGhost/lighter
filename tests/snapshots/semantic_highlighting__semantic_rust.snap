@@ -1,0 +1,10 @@
+---
+source: tests/semantic_highlighting.rs
+expression: rendered
+---
+<a-k>use</a-k> <a-ns>lighter_rust_demo</a-ns><a-o>::</a-o><a-t>Greeter</a-t>;
+
+<a-k>fn</a-k> <a-f>main</a-f>() {
+    <a-k>let</a-k> <a-v>greeter</a-v> <a-o>=</a-o> <a-t>Greeter</a-t><a-o>::</a-o><a-f>new</a-f>(<a-s>&quot;Hello&quot;</a-s>);
+    <a-m>println!</a-m>(<a-s>&quot;</a-s>{}<a-s>&quot;</a-s>, <a-v>greeter</a-v><a-o>.</a-o><a-f>greet</a-f>(<a-s>&quot;Ada&quot;</a-s>));
+}

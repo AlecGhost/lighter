@@ -1,0 +1,10 @@
+---
+source: tests/binary.rs
+expression: snapshot(&output)
+---
+exit: 0
+--- stdout ---
+second & value
+third \\ {value}<EOF>
+--- stderr ---
+<EOF>

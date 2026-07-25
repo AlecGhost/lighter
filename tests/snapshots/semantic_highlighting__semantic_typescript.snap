@@ -1,0 +1,11 @@
+---
+source: tests/semantic_highlighting.rs
+expression: rendered
+---
+import { User } from &quot;./models.js&quot;;
+
+function <a-f>welcome</a-f>(<a-v>user</a-v>: <a-t>User</a-t>): string {
+  return <a-v>user</a-v>.greeting(&quot;Hello&quot;);
+}
+
+<a-v>console</a-v>.log(<a-f>welcome</a-f>(new <a-t>User</a-t>(&quot;Ada&quot;)));
