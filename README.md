@@ -10,7 +10,7 @@ fragments for other tools, or add semantic highlighting to scripts and editor
 workflows.
 
 See the [live highlighter comparison](https://alecghost.github.io/lighter/) for
-side-by-side Highlight.js, Arborium, and Lighter output.
+an interactive comparison of Highlight.js, Arborium, and Lighter output.
 
 ## Features
 

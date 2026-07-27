@@ -30,15 +30,11 @@ const COMPARISONS = Object.freeze({
 const lighterOutput = document.querySelector("#lighter-output");
 const comparisonOutput = document.querySelector("#comparison-output");
 const comparisonSource = document.querySelector("#comparison-source");
-const footerComparisonLabel = document.querySelector(
-  "#footer-comparison-label",
-);
 const codeViewport = document.querySelector("#code-viewport");
 const lighterPane = document.querySelector("#lighter-pane");
 const comparisonPane = document.querySelector("#comparison-pane");
 const scrubberLine = document.querySelector(".scrubber-line");
 const languageTabs = document.querySelector(".language-tabs");
-const sourcePath = document.querySelector("#source-path");
 const status = document.querySelector("#status");
 
 let selectedExample;
@@ -99,7 +95,6 @@ const renderComparison = () => {
     comparisonOutput.innerHTML = arboriumFragment;
   }
 
-  footerComparisonLabel.textContent = comparison.label;
   scrubberLine.setAttribute(
     "aria-valuetext",
     `${100 - comparisonAmount}% Lighter, ${comparisonAmount}% ${comparison.label}`,
@@ -142,7 +137,7 @@ const selectLanguage = async (requestedLanguage) => {
 
   setSelectedTab(language);
   comparisonSource.disabled = true;
-  status.textContent = `Loading ${example.label}…`;
+  status.textContent = "";
 
   try {
     const responses = await Promise.all(
@@ -168,8 +163,6 @@ const selectLanguage = async (requestedLanguage) => {
     comparisonPane.scrollTo(0, 0);
     syncLighterScroll();
 
-    sourcePath.textContent = example.source;
-    status.textContent = `${example.label} example ready`;
     history.replaceState(null, "", `#${language}`);
   } catch (error) {
     status.textContent = error.message;

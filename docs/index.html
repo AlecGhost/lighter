@@ -22,9 +22,20 @@
         <div class="title-block">
           <p class="product-name">Lighter</p>
           <h1>Highlighter comparison</h1>
-          <p class="summary">
-            Compare semantic highlighting with syntax-only output.
-          </p>
+          <div class="highlighter-intros">
+            <p>
+              <strong>Lighter</strong> extends Arborium with semantic
+              highlighting from language servers.
+            </p>
+            <p>
+              <strong>Arborium</strong> provides Tree-sitter-based syntactic
+              highlighting.
+            </p>
+            <p>
+              <strong>Highlight.js</strong> is a popular regex-based JavaScript
+              highlighter.
+            </p>
+          </div>
         </div>
         <div class="language-picker" aria-label="Choose a language">
           <span class="picker-label">Language</span>
@@ -38,22 +49,20 @@
 
       <div class="demo-info">
         <p>Drag the divider to reveal the comparison.</p>
-        <span id="status" role="status" aria-live="polite">Loading Rust…</span>
+        <p id="status" role="status" aria-live="polite"></p>
       </div>
 
       <section class="comparison" aria-label="Highlighter comparison">
         <header class="comparison-heading">
           <div>
-            <h2>
-              <a href="https://github.com/AlecGhost/lighter#readme">Lighter</a>
-            </h2>
+            <h2>Above: Lighter</h2>
             <span class="column-kind">Tree-sitter + LSP</span>
           </div>
           <label class="comparison-picker">
-            <span>Compare with</span>
+            <span>Below:</span>
             <select id="comparison-source" disabled>
               <option value="arborium">Arborium · Tree-sitter</option>
-              <option value="highlightjs">
+              <option value="highlightjs" selected>
                 Highlight.js · Regex-based modes
               </option>
             </select>
@@ -77,18 +86,45 @@
             aria-valuemin="0"
             aria-valuemax="100"
             aria-valuenow="35"
-            aria-valuetext="65% Lighter, 35% Arborium"
+            aria-valuetext="65% Lighter, 35% Highlight.js"
           ></div>
         </div>
       </section>
 
-      <footer>
-        <p>
-          Above: Lighter. Below:
-          <span id="footer-comparison-label">Arborium</span>.
-        </p>
-        <p id="source-path" class="source-path"></p>
-      </footer>
+      <p class="technical-comparison">
+        Lighter adds project-aware language-server semantics to Arborium’s
+        syntax tree, producing the most precise distinctions at the cost of
+        language-server setup and no dynamic in-browser highlighting. Between
+        the syntax-only options, Arborium’s real parser handles nesting, scope,
+        and malformed code more reliably, but its per-language WebAssembly
+        grammars add download weight. Highlight.js trades that structural
+        accuracy for a zero-dependency JavaScript integration, automatic
+        language detection, and broader language coverage, making it easier to
+        use on dynamic web pages.
+      </p>
     </main>
+
+    <footer class="site-footer">
+      <div class="footer-content">
+        <p>Projects</p>
+        <ul>
+          <li>
+            <span>Lighter</span>
+            <a href="https://github.com/AlecGhost/lighter">GitHub</a>
+            <a href="https://alecghost.github.io/lighter/">Web</a>
+          </li>
+          <li>
+            <span>Arborium</span>
+            <a href="https://github.com/bearcove/arborium">GitHub</a>
+            <a href="https://arborium.bearcove.eu/">Web</a>
+          </li>
+          <li>
+            <span>Highlight.js</span>
+            <a href="https://github.com/highlightjs/highlight.js">GitHub</a>
+            <a href="https://highlightjs.org/">Web</a>
+          </li>
+        </ul>
+      </div>
+    </footer>
   </body>
 </html>
