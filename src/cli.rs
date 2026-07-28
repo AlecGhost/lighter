@@ -167,7 +167,7 @@ pub struct StartupArgs {
     )]
     pub custom_theme: Option<PathBuf>,
 
-    /// Output highlighted ANSI, HTML, or LaTeX.
+    /// Output highlighted ANSI, HTML, LaTeX, or Typst.
     #[arg(short, long = OptionName::Format.as_str(), value_enum)]
     pub format: Option<lighter::Output>,
 

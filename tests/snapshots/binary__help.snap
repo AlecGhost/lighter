@@ -34,12 +34,13 @@ Options:
           Path to a custom TOML theme file
 
   -f, --format <FORMAT>
-          Output highlighted ANSI, HTML, or LaTeX
+          Output highlighted ANSI, HTML, LaTeX, or Typst
 
           Possible values:
           - ansi
           - html
           - latex: LaTeX commands intended for an `xcolor`-enabled fvextra `Verbatim` environment using `commandchars=\\\{\}`
+          - typst: Typst markup composed from styled `raw` elements
 
       --log <LOG>
           Set stderr logging verbosity

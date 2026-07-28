@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use super::{Error, Result};
 use crate::{Input, LangName, LineRange, Output, theme};
 
-pub(super) const VERSION: &str = "4";
+pub(super) const VERSION: &str = "5";
 pub(super) const STOP_LANGUAGE: &str = "lighter-internal-stop";
 
 const HEADER_TERMINATOR: u8 = b'\n';

@@ -15,7 +15,9 @@ pub mod daemon;
 mod latex;
 pub mod logging;
 pub mod lsp;
+mod styled;
 pub mod theme;
+mod typst;
 
 const TREE_SITTER_SPANS_HEADING: &str = "Tree-sitter spans:";
 const LSP_SPANS_HEADING: &str = "LSP spans:";
@@ -85,6 +87,8 @@ pub enum Output {
     ///
     /// The command characters '\', '{' and '}' are escaped with '\'.
     Latex,
+    /// Typst markup composed from styled `raw` elements.
+    Typst,
 }
 
 #[derive(Debug)]
@@ -219,6 +223,7 @@ fn render(
         Output::Ansi => spans_to_ansi(source, spans, theme),
         Output::Html => spans_to_html(source, spans, &arborium::HtmlFormat::default()),
         Output::Latex => latex::spans_to_latex(source, spans, theme),
+        Output::Typst => typst::spans_to_typst(source, spans, theme),
     }
 }
 
@@ -434,19 +439,27 @@ mauve = "#010203"
         const SOURCE: &str = "first\nsecond\nthird";
         let theme = Theme::from_toml(THEME_SOURCE).unwrap();
 
-        [Output::Ansi, Output::Html, Output::Latex]
-            .into_iter()
-            .for_each(|output| {
-                let rendered = render(
-                    SOURCE,
-                    Vec::new(),
-                    Vec::new(),
-                    output,
-                    &theme,
-                    Some("2:2".parse().unwrap()),
-                );
-                assert_eq!(rendered, "second");
-            });
+        [
+            (Output::Ansi, "second"),
+            (Output::Html, "second"),
+            (Output::Latex, "second"),
+            (
+                Output::Typst,
+                r#"#block[#set par(leading: 0.52em);#raw("second")]"#,
+            ),
+        ]
+        .into_iter()
+        .for_each(|(output, expected)| {
+            let rendered = render(
+                SOURCE,
+                Vec::new(),
+                Vec::new(),
+                output,
+                &theme,
+                Some("2:2".parse().unwrap()),
+            );
+            assert_eq!(rendered, expected);
+        });
     }
 
     #[test]

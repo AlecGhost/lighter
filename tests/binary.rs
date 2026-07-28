@@ -75,6 +75,7 @@ fn disabled_engines_still_select_and_escape_input() {
         ("ansi", "plain_ansi"),
         ("html", "plain_html"),
         ("latex", "plain_latex"),
+        ("typst", "plain_typst"),
     ] {
         let output = environment.run(
             [

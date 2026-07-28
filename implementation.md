@@ -61,7 +61,7 @@ device, so its logging is not visible in the spawning terminal.
 | `-c, --config FILE` | Explicit TOML configuration. There is no automatic config-file discovery. |
 | `--theme NAME` | Built-in Arborium theme, matched case-insensitively. |
 | `--custom-theme FILE` | Custom Arborium TOML theme. Conflicts with `--theme`. |
-| `-f, --format FORMAT` | `ansi`, `html`, or `latex`; default is `ansi`. |
+| `-f, --format FORMAT` | `ansi`, `html`, `latex`, or `typst`; default is `ansi`. |
 | `--lines RANGE` | Inclusive, one-based selection in `start:end`, `:end`, or `start:` form. |
 | `--no-lsp` | Do not start or query a language server. |
 | `--no-tree-sitter` | Do not produce tree-sitter spans. |
@@ -157,7 +157,8 @@ The core highlighter operates on an `Input` and `HighlightOptions`:
 4. Tree-sitter and semantic spans are concatenated.
 5. If `--lines` is present, the source and spans are clipped to the requested
    byte range and spans are rebased to the selected fragment.
-6. The selected source and merged spans are rendered as ANSI, HTML, or LaTeX.
+6. The selected source and merged spans are rendered as ANSI, HTML, LaTeX, or
+   Typst.
 
 The complete document is always analyzed before line selection. Declarations,
 imports, and other context outside the output range therefore remain visible to
@@ -222,6 +223,24 @@ The characters `\`, `{`, and `}` in source text are escaped with `\`. Other
 characters, including non-ASCII characters and ordinary LaTeX special
 characters, are preserved because the fragment is intended for `Verbatim`.
 Trailing line-feed characters are removed before LaTeX rendering.
+
+#### Typst
+
+Typst output is a `block` containing programmatically constructed `raw` and
+`linebreak` elements. Its paragraph leading matches Typst's normal raw code
+blocks. Styled flat tokens may be wrapped in:
+
+- `text` with an RGB foreground color;
+- `strong`;
+- `emph`;
+- `underline`; and
+- `strike`.
+
+Non-newline source characters are encoded in Typst string literals before
+being passed to `raw`. Backslashes, quotes, tabs, carriage returns, and other
+control characters are escaped; remaining Unicode text is preserved. Source
+newlines become `linebreak` elements. Trailing line-feed characters are removed
+before Typst rendering.
 
 ### 1.10 Configuration format
 
@@ -404,7 +423,7 @@ connectable is an error.
 
 ### 1.14 Daemon wire protocol
 
-The internal daemon protocol version is `4`. Each request uses a fresh stream
+The internal daemon protocol version is `5`. Each request uses a fresh stream
 connection and consists of:
 
 1. one newline-terminated JSON header; and
@@ -435,7 +454,9 @@ main + cli
     └── core highlighter
             ├── Arborium tree-sitter/renderers
             ├── lsp ──> rpc
-            └── latex renderer
+            ├── shared styled-token renderer
+            ├── latex renderer
+            └── typst renderer
 ```
 
 The binary crate owns process policy and user interaction. The library crate
@@ -513,7 +534,7 @@ struct HighlightOptions {
     lines: Option<LineRange>,
 }
 
-enum Output { Ansi, Html, Latex }
+enum Output { Ansi, Html, Latex, Typst }
 ```
 
 `LineRange` parses the public line-selection syntax and is serializable for
@@ -691,23 +712,25 @@ Responsibilities:
 It is intentionally unaware of languages, documents, semantic-token
 conversion, themes, and rendering.
 
-### 2.9 `src/latex.rs`: LaTeX fragment renderer
+### 2.9 `src/styled.rs`, `src/latex.rs`, and `src/typst.rs`: styled fragment renderers
 
-This private renderer exposes one crate-level function:
+The private LaTeX and Typst backends expose one crate-level function each:
 
 ```rust
 spans_to_latex(source: &str, spans: Vec<Span>, theme: &Theme) -> String
+spans_to_typst(source: &str, spans: Vec<Span>, theme: &Theme) -> String
 ```
 
 Responsibilities:
 
-- flatten overlapping Arborium spans into resolved tokens;
-- translate theme foreground colors and text modifiers into LaTeX commands;
-- preserve unstyled gaps;
-- escape `fvextra` command characters; and
-- remove trailing line feeds.
+- `styled` flattens overlapping Arborium spans, resolves token styles, preserves
+  unstyled gaps, and removes trailing line feeds;
+- `latex` translates styles into LaTeX commands and escapes `fvextra` command
+  characters; and
+- `typst` translates styles into Typst functions, encodes non-newline source as
+  escaped `raw` string data, and emits source newlines as `linebreak` elements.
 
-It does not create a document, environment, package preamble, or cache.
+They do not create a complete document, package preamble, or cache.
 
 ### 2.10 `src/daemon.rs`: daemon process and session management
 

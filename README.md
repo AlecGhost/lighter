@@ -3,7 +3,7 @@
 Lighter is a command-line source-code highlighter. It combines
 [Arborium](https://github.com/bearcove/arborium)'s tree-sitter syntax
 highlighting with semantic tokens from language servers, then writes the result
-as terminal colors, HTML, or LaTeX.
+as terminal colors, HTML, LaTeX, or Typst.
 
 Use it to inspect highlighted code in a terminal, generate highlighted
 fragments for other tools, or add semantic highlighting to scripts and editor
@@ -16,7 +16,7 @@ an interactive comparison of Highlight.js, Arborium, and Lighter output.
 
 - Syntax highlighting for the languages supported by Arborium
 - Optional semantic highlighting through the Language Server Protocol (LSP)
-- ANSI, HTML, and LaTeX output
+- ANSI, HTML, LaTeX, and Typst output
 - Built-in and custom themes
 - Inclusive line selection without losing whole-file semantic context
 - A background daemon that keeps language servers warm between invocations
@@ -68,7 +68,7 @@ The most useful options are:
 | --- | --- |
 | `-l, --lang <LANG>` | Set the language instead of detecting it |
 | `-p, --project <DIR>` | Use a directory as the language server workspace |
-| `-f, --format <FORMAT>` | Select `ansi`, `html`, or `latex` |
+| `-f, --format <FORMAT>` | Select `ansi`, `html`, `latex`, or `typst` |
 | `--lines <RANGE>` | Render an inclusive, one-based line range |
 | `--theme <THEME>` | Select a built-in theme |
 | `--custom-theme <FILE>` | Load an Arborium TOML theme |
@@ -217,6 +217,23 @@ A minimal wrapper looks like this:
 \end{Verbatim}
 \end{document}
 ```
+
+`typst` emits a Typst `block` composed from styled `raw` elements:
+
+```sh
+lighter --format typst src/main.rs > snippet.typ
+```
+
+The fragment can be included directly:
+
+```typst
+#include "snippet.typ"
+```
+
+Source text is passed to `raw` as escaped string data, so Typst markup in the
+highlighted source is displayed verbatim. Source newlines become `linebreak`
+elements, with leading matched to normal Typst raw code blocks. Theme colors
+and bold, italic, underline, and strikethrough modifiers are preserved.
 
 ## Semantic highlighting
 

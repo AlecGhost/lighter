@@ -1,0 +1,9 @@
+---
+source: tests/binary.rs
+expression: snapshot(&output)
+---
+exit: 0
+--- stdout ---
+#block[#set par(leading: 0.52em);#raw("second & value")#linebreak()#raw("third \\\\ {value}")]<EOF>
+--- stderr ---
+<EOF>
