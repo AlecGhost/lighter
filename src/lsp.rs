@@ -34,19 +34,6 @@ const MAX_TEMP_FILE_ATTEMPTS: usize = 100;
 const URI_HEX_DIGITS: &[u8; 16] = b"0123456789ABCDEF";
 const DOCUMENT_OPEN_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 const PROGRESS_END_WAIT_TIMEOUT: Duration = Duration::from_secs(15);
-const TYPE_TOKEN_TYPES: &[SemanticTokenType] = &[
-    SemanticTokenType::CLASS,
-    SemanticTokenType::INTERFACE,
-    SemanticTokenType::STRUCT,
-];
-const TOKEN_CAPTURE_MAPPINGS: &[(SemanticTokenType, &str)] = &[
-    (SemanticTokenType::TYPE_PARAMETER, "type.parameter"),
-    (SemanticTokenType::PARAMETER, "variable.parameter"),
-    (SemanticTokenType::ENUM, "type.enum"),
-    (SemanticTokenType::ENUM_MEMBER, "type.enum.variant"),
-    (SemanticTokenType::MODIFIER, "keyword.modifier"),
-    (SemanticTokenType::REGEXP, "string.regexp"),
-];
 
 static NEXT_TEMP_FILE_ID: AtomicUsize = AtomicUsize::new(0);
 
@@ -122,7 +109,10 @@ pub fn default_commands() -> (Commands, LangCaptureMapping) {
             "basedpyright-langserver",
             &["--stdio"],
             json!({}),
-            &[("type.parameter", "variable.parameter")],
+            &[
+                ("type.parameter", "variable.parameter"),
+                ("selfParameter", "variable.parameter"),
+            ],
         ),
         (
             "typescript",
@@ -733,19 +723,22 @@ fn capture_for_token_type<'a>(
 }
 
 fn default_capture_for_token_type(token_type: &SemanticTokenType) -> &str {
-    if TYPE_TOKEN_TYPES.contains(token_type) {
-        return "type";
+    const TYPE_TOKEN_TYPES: &[SemanticTokenType] = &[
+        SemanticTokenType::CLASS,
+        SemanticTokenType::INTERFACE,
+        SemanticTokenType::STRUCT,
+    ];
+    match token_type {
+        tt if TYPE_TOKEN_TYPES.contains(tt) => "type",
+        tt if *tt == SemanticTokenType::TYPE_PARAMETER => "type.parameter",
+        tt if *tt == SemanticTokenType::PARAMETER => "variable.parameter",
+        tt if *tt == SemanticTokenType::ENUM => "type.enum",
+        tt if *tt == SemanticTokenType::ENUM_MEMBER => "type.enum.variant",
+        tt if *tt == SemanticTokenType::MODIFIER => "keyword.modifier",
+        tt if *tt == SemanticTokenType::REGEXP => "string.regexp",
+        // NOTE: currently unsupported default LSP token types are `event` and `decorator`.
+        tt => tt.as_str(),
     }
-
-    if let Some(capture) = TOKEN_CAPTURE_MAPPINGS
-        .iter()
-        .find_map(|(candidate, capture)| (candidate == token_type).then_some(*capture))
-    {
-        return capture;
-    }
-
-    // NOTE: currently unsupported default LSP token types are `event` and `decorator`.
-    token_type.as_str()
 }
 
 struct LineIndex<'source> {
