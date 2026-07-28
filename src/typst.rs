@@ -128,10 +128,20 @@ mod tests {
 
     #[test]
     fn escapes_typst_strings_and_preserves_other_text() {
-        const SOURCE: &str = "\\\"\n\t\r\u{8}#[]😀";
+        const SOURCE: &str = "\\\"\t\r\u{8}#[]😀";
+        const EXPECTED: &str = r##"#text(fill: rgb("#010203"))[#raw("\\\"\t\r\u{8}#[]😀")]"##;
+        let spans = vec![span(0..SOURCE.len(), ThemeSlot::Keyword, 0)];
+
+        assert_eq!(render(SOURCE, spans), block(EXPECTED));
+    }
+
+    #[test]
+    fn renders_each_line_of_a_multiline_token_with_its_own_style() {
+        const SOURCE: &str = "first\r\nsecond";
         const EXPECTED: &str = concat!(
-            r##"#text(fill: rgb("#010203"))["##,
-            r##"#raw("\\\"")#linebreak()#raw("\t\r\u{8}#[]😀")]"##,
+            r##"#text(fill: rgb("#010203"))[#raw("first")]"##,
+            "#linebreak()",
+            r##"#text(fill: rgb("#010203"))[#raw("second")]"##,
         );
         let spans = vec![span(0..SOURCE.len(), ThemeSlot::Keyword, 0)];
 

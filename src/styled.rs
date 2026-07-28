@@ -18,10 +18,10 @@ pub(crate) fn render<B: Backend>(source: &str, spans: Vec<Span>, theme: &Theme) 
             let end = token.end as usize;
             write_text::<B>(&mut output, &source[cursor..start]);
 
-            let groups = style_for_tag(theme, token.tag)
-                .map_or(0, |style| B::write_style(&mut output, style));
-            write_text::<B>(&mut output, &source[start..end]);
-            output.extend(std::iter::repeat_n(B::STYLE_END, groups));
+            match style_for_tag(theme, token.tag) {
+                Some(style) => write_styled_text::<B>(&mut output, &source[start..end], style),
+                None => write_text::<B>(&mut output, &source[start..end]),
+            }
 
             (output, end)
         },
@@ -34,6 +34,26 @@ fn write_text<B: Backend>(output: &mut String, text: &str) {
     if !text.is_empty() {
         B::write_text(output, text);
     }
+}
+
+fn write_styled_text<B: Backend>(output: &mut String, text: &str, style: &Style) {
+    text.split_inclusive('\n').for_each(|segment| {
+        let (line, line_ending) = match segment.strip_suffix("\r\n") {
+            Some(line) => (line, "\r\n"),
+            None => match segment.strip_suffix('\n') {
+                Some(line) => (line, "\n"),
+                None => (segment, ""),
+            },
+        };
+        write_styled_line::<B>(output, line, style);
+        write_text::<B>(output, line_ending);
+    });
+}
+
+fn write_styled_line<B: Backend>(output: &mut String, line: &str, style: &Style) {
+    let groups = B::write_style(output, style);
+    B::write_text(output, line);
+    output.extend(std::iter::repeat_n(B::STYLE_END, groups));
 }
 
 fn style_for_tag<'a>(theme: &'a Theme, tag: &str) -> Option<&'a Style> {

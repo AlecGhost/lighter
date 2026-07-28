@@ -107,4 +107,17 @@ mod tests {
 
         assert_eq!(render(SOURCE, spans), EXPECTED);
     }
+
+    #[test]
+    fn renders_each_line_of_a_multiline_token_with_its_own_style() {
+        const SOURCE: &str = "f\"\"\"\n<INFORMATION>\nThis is an important message from me, }";
+        const EXPECTED: &str = concat!(
+            "\\textcolor[HTML]{010203}{f\"\"\"}\n",
+            "\\textcolor[HTML]{010203}{<INFORMATION>}\n",
+            r"\textcolor[HTML]{010203}{This is an important message from me, \}}",
+        );
+        let spans = vec![span(0..SOURCE.len(), ThemeSlot::Keyword, 0)];
+
+        assert_eq!(render(SOURCE, spans), EXPECTED);
+    }
 }
