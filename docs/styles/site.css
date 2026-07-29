@@ -157,24 +157,6 @@ h1 {
   border-bottom: 1px solid var(--border);
 }
 
-.comparison-heading > div {
-  display: flex;
-  align-items: baseline;
-  gap: 0.65rem;
-}
-
-h2 {
-  margin: 0;
-  font-size: 0.9rem;
-  font-weight: 600;
-}
-
-.column-kind {
-  color: var(--muted);
-  font-size: 0.72rem;
-  white-space: nowrap;
-}
-
 .comparison-picker {
   display: flex;
   align-items: center;
@@ -183,7 +165,10 @@ h2 {
   font-size: 0.75rem;
 }
 
-.comparison-picker select {
+.comparison-picker select,
+.comparison-value {
+  display: flex;
+  align-items: center;
   min-height: 2rem;
   border: 1px solid var(--border);
   border-radius: 0.3rem;
@@ -191,6 +176,10 @@ h2 {
   background: var(--page);
   color: var(--text);
   font-size: 0.78rem;
+}
+
+.comparison-value {
+  padding-right: 0.55rem;
 }
 
 .comparison-picker select:focus-visible,
@@ -374,7 +363,8 @@ code {
     gap: 0.35rem;
   }
 
-  .comparison-picker select {
+  .comparison-picker select,
+  .comparison-value {
     width: 100%;
     min-height: 2.75rem;
   }
