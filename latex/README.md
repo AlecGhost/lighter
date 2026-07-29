@@ -3,6 +3,7 @@
 This LuaLaTeX package highlights code with [`lighter`](https://github.com/AlecGhost/lighter)
 and typesets its LaTeX response through `fvextra`'s `Verbatim`.
 The result are code blocks like `minted`, but with accurate syntactic and semantic highlighting.
+Attention: you have to install `lighter` and matching language servers separately.
 
 ```tex
 \usepackage{lighter/lighter}

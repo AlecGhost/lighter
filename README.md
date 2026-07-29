@@ -1,13 +1,18 @@
 # Lighter
 
-Lighter is a command-line source-code highlighter. It combines
-[Arborium](https://github.com/bearcove/arborium)'s tree-sitter syntax
-highlighting with semantic tokens from language servers, then writes the result
-as terminal colors, HTML, LaTeX, or Typst.
+Lighter is a command-line source-code highlighter.
+It combines tree-sitter syntax highlighting,
+provided by the amazing [Arborium](https://github.com/bearcove/arborium) project,
+with semantic tokens from language servers,
+then writes the result as terminal colours, HTML, LaTeX, or Typst.
 
-Use it to inspect highlighted code in a terminal, generate highlighted
-fragments for other tools, or add semantic highlighting to scripts and editor
-workflows.
+Arborium "gets you 90% of the way", is easy to use and can highlight a website dynamically.
+Lighter is for the perfectionists among us,
+who want the same quality of code highlighting as in an IDE.
+The trade-off is a lack of portability–it doesn't run in the browser,
+thus can't highlight code client-side.
+Instead, it generates code statically,
+based on information from locally installed language servers.
 
 See the [live highlighter comparison](https://alecghost.github.io/lighter/) for
 an interactive comparison of Highlight.js, Arborium, and Lighter output.
@@ -15,18 +20,16 @@ an interactive comparison of Highlight.js, Arborium, and Lighter output.
 ## Features
 
 - Syntax highlighting for the languages supported by Arborium
-- Optional semantic highlighting through the Language Server Protocol (LSP)
+- Semantic highlighting through the Language Server Protocol (LSP)
 - ANSI, HTML, LaTeX, and Typst output
 - Built-in and custom themes
-- Inclusive line selection without losing whole-file semantic context
+- Line selection without losing whole-file semantic context
 - A background daemon that keeps language servers warm between invocations
-- File input with language detection, or standard input with an explicit
-  language
 
 ## Installation
 
-Lighter is currently installed from source. It requires a recent stable Rust
-toolchain.
+Lighter is currently installed from source.
+It requires a recent stable Rust toolchain.
 
 ```sh
 git clone https://github.com/AlecGhost/lighter.git
@@ -34,13 +37,13 @@ cd lighter
 cargo install --path .
 ```
 
-Language servers are separate programs. Install the server for the language
-whose semantic highlighting you want.
+Language servers are separate programs.
+Install the server for the language whose semantic highlighting you want.
 
 ## Quick start
 
-If the matching language server is installed, include semantic information and
-expose the current directory as its workspace:
+If the matching language server is installed,
+expose the project directory as its workspace:
 
 ```sh
 lighter --project . src/main.rs
@@ -66,13 +69,13 @@ The most useful options are:
 
 | Option | Purpose |
 | --- | --- |
-| `-l, --lang <LANG>` | Set the language instead of detecting it |
 | `-p, --project <DIR>` | Use a directory as the language server workspace |
 | `-f, --format <FORMAT>` | Select `ansi`, `html`, `latex`, or `typst` |
+| `-l, --lang <LANG>` | Set the language instead of detecting it |
 | `--lines <RANGE>` | Render an inclusive, one-based line range |
 | `--theme <THEME>` | Select a built-in theme |
 | `--custom-theme <FILE>` | Load an Arborium TOML theme |
-| `-c, --config <FILE>` | Load a Lighter TOML configuration |
+| `-c, --config <FILE>` | Load a Lighter TOML configuration file |
 
 Run `lighter --help` for the complete interface and the available built-in
 themes.
@@ -93,110 +96,22 @@ rendered range.
 
 ### Output formats
 
-`ansi` is the default and emits terminal color escape sequences. For paging,
-use a pager that preserves colors:
+`ansi` is the default and emits terminal colour escape sequences.
 
 ```sh
-lighter  src/main.rs | less -R
+lighter  src/main.rs
 ```
 
 `html` emits an HTML fragment using Arborium custom elements such as `<a-k>`
 and `<a-f>`. It does not emit a complete page or CSS, so the embedding page
 must style those elements.
+It is recommended to link to Arborium's [base.css](https://cdn.jsdelivr.net/npm/@arborium/arborium@2.18.1/dist/themes/base.css)
+and one of its [theme files](https://www.jsdelivr.com/package/npm/@arborium/arborium?tab=files&path=dist%2Fthemes),
+e.g. [catppuccin-mocha.css](https://cdn.jsdelivr.net/npm/@arborium/arborium@2.18.1/dist/themes/catppuccin-mocha.css).
 
 ```sh
 lighter --format html src/main.rs > snippet.html
 ```
-
-#### Arborium comparison
-
-The following HTML compares the same [Rust source](examples/html-comparison/source.rs)
-twice:
-
-```sh
-arborium --html --lang rust examples/html-comparison/source.rs
-lighter --format html --project . examples/html-comparison/source.rs
-```
-
-The first snippet contains Arborium's tree-sitter spans. The second contains
-Lighter's merged tree-sitter and rust-analyzer semantic spans. Both use
-Arborium's checked-in
-[`base-rustdoc.css`](examples/html-comparison/arborium-base.css) and
-[`catppuccin-mocha.css`](examples/html-comparison/catppuccin-mocha.css), copied
-unchanged from `packages/arborium/src/themes`.
-
-<style>
-@import url("examples/html-comparison/arborium-base.css");
-@import url("examples/html-comparison/catppuccin-mocha.css");
-
-.html-comparison pre {
-  min-width: 34rem;
-  margin: 0;
-  padding: 1rem;
-  overflow: auto;
-  background: var(--arb-bg-dark);
-  color: var(--arb-fg-dark);
-  line-height: 1.5;
-}
-</style>
-
-<table class="html-comparison">
-  <thead>
-    <tr>
-      <th>Arborium · tree-sitter</th>
-      <th>Lighter · tree-sitter + rust-analyzer</th>
-    </tr>
-  </thead>
-  <tbody>
-    <tr>
-      <td>
-        <pre><code><a-k>use</a-k> std<a-p>::</a-p>fmt<a-p>::</a-p><a-cr>Display</a-cr><a-p>;</a-p>
-
-<a-at>#</a-at><a-p>[</a-p><a-at>derive</a-at><a-p>(</a-p><a-cr>Debug</a-cr><a-p>)]</a-p>
-<a-k>struct</a-k> <a-t>User</a-t> <a-p>{</a-p>
-    <a-pr>name</a-pr><a-p>:</a-p> <a-t>String</a-t><a-p>,</a-p>
-<a-p>}</a-p>
-
-<a-k>impl</a-k> <a-t>User</a-t> <a-p>{</a-p>
-    <a-k>fn</a-k> <a-f>label</a-f><a-p>&lt;</a-p><a-t>T</a-t><a-p>:</a-p> <a-t>Display</a-t><a-p>&gt;(</a-p><a-o>&amp;</a-o><a-v>self</a-v><a-p>,</a-p> <a-v>prefix</a-v><a-p>:</a-p> <a-t>T</a-t><a-p>)</a-p> -&gt; <a-t>String</a-t> <a-p>{</a-p>
-        <a-m>format!</a-m><a-p>(</a-p><a-s>&quot;{prefix}: {}&quot;</a-s><a-p>,</a-p> <a-v>self</a-v><a-p>.</a-p><a-pr>name</a-pr><a-p>)</a-p>
-    <a-p>}</a-p>
-<a-p>}</a-p>
-
-<a-k>fn</a-k> <a-f>main</a-f><a-p>()</a-p> <a-p>{</a-p>
-    <a-k>let</a-k> user = <a-t>User</a-t> <a-p>{</a-p>
-        <a-pr>name</a-pr><a-p>:</a-p> <a-s>&quot;Ada&quot;</a-s><a-p>.</a-p><a-f>to_owned</a-f><a-p>(),</a-p>
-    <a-p>};</a-p>
-    <a-m>println!</a-m><a-p>(</a-p><a-s>&quot;{}&quot;</a-s><a-p>,</a-p> user<a-p>.</a-p><a-f>label</a-f><a-p>(</a-p><a-s>&quot;user&quot;</a-s><a-p>));</a-p>
-<a-p>}</a-p></code></pre>
-      </td>
-      <td>
-        <pre><code><a-k>use</a-k> std<a-o>::</a-o>fmt<a-o>::</a-o><a-cr>Display</a-cr><a-p>;</a-p>
-
-<a-at>#</a-at><a-p>[</a-p><a-at>derive</a-at><a-p>(</a-p><a-cr>Debug</a-cr><a-p>)]</a-p>
-<a-k>struct</a-k> <a-t>User</a-t> <a-p>{</a-p>
-    <a-pr>name</a-pr><a-p>:</a-p> <a-t>String</a-t><a-p>,</a-p>
-<a-p>}</a-p>
-
-<a-k>impl</a-k> <a-t>User</a-t> <a-p>{</a-p>
-    <a-k>fn</a-k> <a-f>label</a-f><a-p>&lt;</a-p><a-t>T</a-t><a-p>:</a-p> <a-t>Display</a-t><a-p>&gt;(</a-p><a-o>&amp;</a-o><a-v>self</a-v><a-p>,</a-p> <a-v>prefix</a-v><a-p>:</a-p> <a-t>T</a-t><a-p>)</a-p> <a-o>-&gt;</a-o> <a-t>String</a-t> <a-p>{</a-p>
-        <a-m>format!</a-m><a-p>(</a-p><a-s>&quot;{prefix}: {}&quot;</a-s><a-p>,</a-p> <a-k>self</a-k><a-o>.</a-o><a-pr>name</a-pr><a-p>)</a-p>
-    <a-p>}</a-p>
-<a-p>}</a-p>
-
-<a-k>fn</a-k> <a-f>main</a-f><a-p>()</a-p> <a-p>{</a-p>
-    <a-k>let</a-k> <a-v>user</a-v> <a-o>=</a-o> <a-t>User</a-t> <a-p>{</a-p>
-        <a-pr>name</a-pr><a-p>:</a-p> <a-s>&quot;Ada&quot;</a-s><a-o>.</a-o><a-f>to_owned</a-f><a-p>(),</a-p>
-    <a-p>};</a-p>
-    <a-m>println!</a-m><a-p>(</a-p><a-s>&quot;{}&quot;</a-s><a-p>,</a-p> user<a-o>.</a-o><a-f>label</a-f><a-p>(</a-p><a-s>&quot;user&quot;</a-s><a-p>));</a-p>
-<a-p>}</a-p></code></pre>
-      </td>
-    </tr>
-  </tbody>
-</table>
-
-Lighter's semantic spans distinguish operators such as `::`, `->`, `=`, and
-member access, and classify semantic identifiers such as `self`.
 
 `latex` emits commands for an `fvextra` `Verbatim` environment with `xcolor`
 enabled and `commandchars=\\\{\}`:
@@ -218,6 +133,9 @@ A minimal wrapper looks like this:
 \end{document}
 ```
 
+I hacked together a [package](./latex/) that invokes lighter automatically for you,
+with a similar interface as minted.
+
 `typst` emits a Typst `block` composed from styled `raw` elements:
 
 ```sh
@@ -229,11 +147,6 @@ The fragment can be included directly:
 ```typst
 #include "snippet.typ"
 ```
-
-Source text is passed to `raw` as escaped string data, so Typst markup in the
-highlighted source is displayed verbatim. Source newlines become `linebreak`
-elements, with leading matched to normal Typst raw code blocks. Theme colors
-and bold, italic, underline, and strikethrough modifiers are preserved.
 
 ## Semantic highlighting
 
@@ -298,23 +211,11 @@ const = "constant"
 decorator = "constant"
 ```
 
-Server command strings use shell-like quoting but are executed directly, not
-through a shell.
-
 A custom theme can be selected relative to the configuration file:
 
 ```toml
 theme = { path = "theme.toml" }
 ```
-
-Command-line theme options override the configured theme:
-
-```sh
-lighter --config lighter.toml --theme "GitHub Light" src/main.rs
-lighter --custom-theme ./theme.toml src/main.rs
-```
-
-Without a configured or command-line theme, Lighter uses Catppuccin Mocha.
 
 ## Daemon
 
@@ -340,14 +241,13 @@ lighter daemon spawn \
 Per-invocation `--format`, `--theme`, and `--custom-theme` options
 override the daemon defaults. Passing `--config`
 updates the active server and capture configuration for that daemon session.
-Pass a theme option explicitly when changing themes on a running daemon.
 
 ## Troubleshooting
 
 **`No language server available for …`**
 
 The language has no built-in or configured server. Add an entry under
-`[servers]`, or pass ``.
+`[servers]`, or pass `--no-lsp`.
 
 **`Failed to start server for …`**
 
