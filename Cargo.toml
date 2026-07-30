@@ -1,7 +1,18 @@
 [package]
-name = "lighter"
+name = "alecghost-lighter"
+description = "IDE-grade code highlighting"
 version = "0.1.0"
 edition = "2024"
+repository = "https://github.com/AlecGhost/lighter"
+license = "Apache-2.0"
+
+[lib]
+name = "lighter"
+path = "src/lib.rs"
+
+[[bin]]
+name = "lighter"
+path = "src/main.rs"
 
 [dependencies]
 arborium = { version = "2.18", features = ["all-languages"] }
