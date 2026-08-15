@@ -1,0 +1,32 @@
+{
+  "name": "@alecghost/lighter",
+  "version": "0.1.0",
+  "description": "IDE-grade code highlighting",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/AlecGhost/lighter.git"
+  },
+  "bin": {
+    "lighter": "dist/index.js"
+  },
+  "files": [
+    "dist/"
+  ],
+  "scripts": {
+    "build": "tsc"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "optionalDependencies": {
+    "@alecghost/lighter-darwin-arm64": "0.1.0",
+    "@alecghost/lighter-darwin-x64": "0.1.0",
+    "@alecghost/lighter-linux-x64": "0.1.0",
+    "@alecghost/lighter-win32-x64": "0.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "typescript": "^5"
+  }
+}

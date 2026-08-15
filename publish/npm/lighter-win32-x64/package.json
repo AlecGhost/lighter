@@ -1,0 +1,19 @@
+{
+  "name": "@alecghost/lighter-win32-x64",
+  "version": "0.1.0",
+  "description": "Platform binary for @alecghost/lighter (win32-x64)",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/AlecGhost/lighter.git"
+  },
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "files": [
+    "bin/lighter.exe"
+  ]
+}

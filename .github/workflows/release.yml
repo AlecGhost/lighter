@@ -6,6 +6,7 @@ on:
 
 permissions:
   contents: read
+  id-token: write
 
 jobs:
   build:
@@ -18,15 +19,19 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             archive: lighter-x86_64-unknown-linux-gnu.tar.gz
+            npm-platform: linux-x64
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             archive: lighter-x86_64-pc-windows-msvc.zip
+            npm-platform: win32-x64
           - os: macos-15-intel
             target: x86_64-apple-darwin
             archive: lighter-x86_64-apple-darwin.tar.gz
+            npm-platform: darwin-x64
           - os: macos-15
             target: aarch64-apple-darwin
             archive: lighter-aarch64-apple-darwin.tar.gz
+            npm-platform: darwin-arm64
 
     steps:
       - name: Check out source
@@ -58,11 +63,18 @@ jobs:
             -Path "target/${{ matrix.target }}/release/lighter.exe" `
             -DestinationPath "dist/${{ matrix.archive }}"
 
-      - name: Upload build
+      - name: Upload release archive
         uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.archive }}
           path: dist/${{ matrix.archive }}
+          if-no-files-found: error
+
+      - name: Upload npm binary
+        uses: actions/upload-artifact@v7
+        with:
+          name: npm-${{ matrix.npm-platform }}
+          path: target/${{ matrix.target }}/release/lighter${{ runner.os == 'Windows' && '.exe' || '' }}
           if-no-files-found: error
 
   upload:
@@ -86,3 +98,139 @@ jobs:
           tag_name: ${{ github.event.release.tag_name }}
           files: dist/*
           fail_on_unmatched_files: true
+
+  publish-npm:
+    name: Publish to npm
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - name: Extract version
+        id: version
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Download npm binaries
+        uses: actions/download-artifact@v8
+        with:
+          pattern: npm-*
+          path: npm-bins
+
+      - name: Assemble and publish platform packages
+        shell: bash
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+
+          for platform_dir in npm-bins/npm-*; do
+            PLATFORM="${platform_dir##*/npm-}"
+            PKG_DIR="publish/npm/lighter-${PLATFORM}"
+
+            # Set version
+            tmp=$(mktemp)
+            jq --arg v "$VERSION" '.version = $v' "${PKG_DIR}/package.json" > "$tmp"
+            mv "$tmp" "${PKG_DIR}/package.json"
+
+            # Copy binary into bin/
+            mkdir -p "${PKG_DIR}/bin"
+            cp "${platform_dir}"/lighter* "${PKG_DIR}/bin/"
+            chmod +x "${PKG_DIR}/bin/"*
+
+            echo "Publishing @alecghost/lighter-${PLATFORM}@${VERSION}"
+            npm publish "${PKG_DIR}" --access public --provenance
+          done
+
+      - name: Build and publish root package
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          ROOT_DIR="publish/npm/lighter"
+
+          cd "${ROOT_DIR}"
+          npm install
+          npm run build
+
+          # Set version on root and all optionalDependencies
+          tmp=$(mktemp)
+          jq --arg v "$VERSION" '
+            .version = $v |
+            .optionalDependencies |= with_entries(.value = $v)
+          ' package.json > "$tmp"
+          mv "$tmp" package.json
+
+          echo "Publishing @alecghost/lighter@${VERSION}"
+          npm publish --access public --provenance
+
+  publish-pypi:
+    name: Publish to PyPI
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+          - os: macos-15
+            target: aarch64-apple-darwin
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Build wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          args: --release --out dist
+          manylinux: auto
+          working-directory: publish/pypi
+
+      - name: Upload wheel
+        uses: actions/upload-artifact@v7
+        with:
+          name: wheel-${{ matrix.target }}
+          path: publish/pypi/dist/*.whl
+          if-no-files-found: error
+
+  publish-pypi-upload:
+    name: Upload to PyPI
+    needs: publish-pypi
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/alecghost-lighter
+    permissions:
+      id-token: write
+
+    steps:
+      - name: Download wheels
+        uses: actions/download-artifact@v8
+        with:
+          pattern: wheel-*
+          path: dist
+          merge-multiple: true
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/

@@ -1,0 +1,28 @@
+[build-system]
+requires = ["maturin>=1.5,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "alecghost-lighter"
+version = "0.1.0"
+description = "IDE-grade code highlighting"
+readme = "../../README.md"
+license = "Apache-2.0"
+requires-python = ">=3.8"
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Topic :: Text Processing :: General",
+]
+
+[project.urls]
+Repository = "https://github.com/AlecGhost/lighter"
+
+[tool.maturin]
+bindings = "bin"
+manifest-path = "../../Cargo.toml"
+strip = true
+python-source = "."
+module-name = "lighter"
