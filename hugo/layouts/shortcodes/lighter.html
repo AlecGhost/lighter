@@ -1,0 +1,47 @@
+{{ $fileParam := .Get "file" | default (.Get 0) }}
+{{ $title := .Get "title" | default $fileParam }}
+{{ $lang := .Get "lang" | default "" }}
+
+{{ $filePath := printf "data/code/%s" $fileParam }}
+{{ $content := "" }}
+
+{{ if fileExists $filePath }}
+  {{ $content = readFile $filePath }}
+{{ else if fileExists $fileParam }}
+  {{ $content = readFile $fileParam }}
+{{ else }}
+  {{ $res := resources.Get (printf "code/%s" $fileParam) }}
+  {{ if not $res }}
+    {{ $res = resources.Get $fileParam }}
+  {{ end }}
+  {{ if $res }}
+    {{ $content = $res.Content }}
+  {{ else }}
+    {{ errorf "Lighter shortcode: code file not found: %s" $fileParam }}
+  {{ end }}
+{{ end }}
+
+{{ if not (.Page.Store.Get "lighter_loaded") }}
+  {{ .Page.Store.Set "lighter_loaded" true }}
+  {{ $catppuccin := resources.Get "css/catppuccin-mocha.css" }}
+  {{ $arborium := resources.Get "css/arborium.css" }}
+  {{ $codeboxCss := resources.Get "css/codebox.css" }}
+  {{ $codeboxJs := resources.Get "js/codebox.js" }}
+  {{ with $catppuccin }}<link rel="stylesheet" href="{{ .RelPermalink }}">{{ end }}
+  {{ with $arborium }}<link rel="stylesheet" href="{{ .RelPermalink }}">{{ end }}
+  {{ with $codeboxCss }}<link rel="stylesheet" href="{{ .RelPermalink }}">{{ end }}
+  {{ with $codeboxJs }}<script src="{{ .RelPermalink }}" defer></script>{{ end }}
+{{ end }}
+
+<div class="codebox">
+  <div class="codebox-header">
+    <div class="codebox-title-group">
+      <span class="codebox-title">{{ $title }}</span>
+    </div>
+    <div class="codebox-actions">
+      {{ with $lang }}<span class="codebox-lang">{{ . }}</span>{{ end }}
+      <button class="codebox-copy-btn" onclick="copyCodebox(this)">Copy</button>
+    </div>
+  </div>
+  <div class="codebox-body"><pre><code>{{ $content | safeHTML }}</code></pre></div>
+</div>

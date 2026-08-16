@@ -1,0 +1,115 @@
+/* ==========================================================================
+   CODE BOX & CUSTOM SYNTAX HIGHLIGHTER CONTAINER
+   ========================================================================== */
+
+.codebox {
+  background-color: var(--code-bg, #181825);
+  border: 1px solid var(--code-border, #313244);
+  border-radius: var(--radius-md, 8px);
+  margin: 1.75rem 0;
+  overflow: hidden;
+  max-width: 100%;
+}
+
+.codebox-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.5rem 0.9rem;
+  background-color: #11111b;
+  border-bottom: 1px solid var(--code-border, #313244);
+  font-size: 0.8rem;
+  color: var(--text-secondary, #a6adc8);
+  user-select: none;
+  gap: 0.5rem;
+}
+
+.codebox-title-group {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  flex: 1;
+}
+
+.codebox-title {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace);
+  font-size: 0.82rem;
+  color: var(--text-secondary, #a6adc8);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.codebox-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-shrink: 0;
+}
+
+.codebox-lang {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace);
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  color: var(--text-muted, #6c7086);
+  background: #181825;
+  border: 1px solid var(--code-border, #313244);
+  padding: 0.1rem 0.4rem;
+  border-radius: var(--radius-sm, 4px);
+}
+
+.codebox-copy-btn {
+  background: #1e1e2e;
+  border: 1px solid #313244;
+  color: #a6adc8;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace);
+  font-size: 0.75rem;
+  padding: 0.25rem 0.6rem;
+  border-radius: var(--radius-sm, 4px);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  touch-action: manipulation;
+}
+
+.codebox-copy-btn:hover {
+  background: #313244;
+  color: #cdd6f4;
+  border-color: #45475a;
+}
+
+.codebox-copy-btn:active {
+  background: #45475a;
+}
+
+.codebox-body {
+  padding: 1.25rem;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace);
+  font-size: 0.9rem;
+  line-height: 1.6;
+  white-space: pre;
+  color: var(--arb-fg-dark, #cdd6f4);
+}
+
+.codebox-body pre {
+  margin: 0;
+  font-family: inherit;
+  font-size: inherit;
+  line-height: inherit;
+  white-space: inherit;
+  background: transparent !important;
+  border: none !important;
+  padding: 0 !important;
+}
+
+@media (max-width: 768px) {
+  .codebox {
+    margin: 1.25rem 0;
+  }
+
+  .codebox-body {
+    padding: 1rem;
+    font-size: 0.82rem;
+  }
+}
