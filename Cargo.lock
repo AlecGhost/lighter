@@ -19,6 +19,7 @@ dependencies = [
  "arborium-highlight",
  "arborium-theme",
  "clap",
+ "getrandom",
  "insta",
  "libc",
  "lsp-types",

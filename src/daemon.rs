@@ -26,6 +26,7 @@ enum DaemonPath {
     Directory,
     Endpoint,
     Lock,
+    Token,
 }
 
 impl DaemonPath {
@@ -34,6 +35,7 @@ impl DaemonPath {
             Self::Directory => "lighter",
             Self::Endpoint => "daemon.sock",
             Self::Lock => "daemon.lock",
+            Self::Token => "daemon.token",
         }
     }
 }
@@ -58,6 +60,10 @@ pub enum Error {
     InvalidUtf8(#[from] std::string::FromUtf8Error),
     #[error("Daemon response id {actual} does not match request id {expected}")]
     ResponseId { expected: u64, actual: u64 },
+    #[error("Daemon request is not authorized")]
+    Unauthorized,
+    #[error("Daemon message exceeds the {} byte limit", protocol::MAX_MESSAGE_SIZE)]
+    MessageTooLarge,
     #[error("Daemon returned an error: {0}")]
     Response(String),
     #[error("Daemon is already running")]
@@ -159,6 +165,7 @@ struct DaemonPaths {
     directory: PathBuf,
     endpoint: PathBuf,
     lock: PathBuf,
+    token: PathBuf,
 }
 
 impl DaemonPaths {
@@ -167,6 +174,7 @@ impl DaemonPaths {
         Self {
             endpoint: directory.join(DaemonPath::Endpoint.as_str()),
             lock: directory.join(DaemonPath::Lock.as_str()),
+            token: directory.join(DaemonPath::Token.as_str()),
             directory,
         }
     }
@@ -176,6 +184,7 @@ impl DaemonPaths {
         Self {
             endpoint: directory.join(DaemonPath::Endpoint.as_str()),
             lock: directory.join(DaemonPath::Lock.as_str()),
+            token: directory.join(DaemonPath::Token.as_str()),
             directory: directory.to_owned(),
         }
     }
@@ -207,7 +216,7 @@ fn runtime_identity() -> String {
 mod local {
     use super::*;
     use std::os::fd::AsRawFd;
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
     use std::os::unix::net::{UnixListener, UnixStream};
 
     pub type Listener = UnixListener;
@@ -215,7 +224,36 @@ mod local {
 
     pub fn prepare_directory(path: &Path) -> io::Result<()> {
         fs::create_dir_all(path)?;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+        verify_private_directory(path)
+    }
+
+    /// Refuses a runtime directory that another user could have created or can modify.
+    fn verify_private_directory(path: &Path) -> io::Result<()> {
+        let metadata = fs::symlink_metadata(path)?;
+        match metadata.is_dir() && is_owned(&metadata) && metadata.mode() & 0o077 == 0 {
+            true => Ok(()),
+            false => Err(untrusted(path)),
+        }
+    }
+
+    fn verify_owned_socket(path: &Path) -> io::Result<()> {
+        let metadata = fs::symlink_metadata(path)?;
+        match metadata.file_type().is_socket() && is_owned(&metadata) {
+            true => Ok(()),
+            false => Err(untrusted(path)),
+        }
+    }
+
+    fn is_owned(metadata: &fs::Metadata) -> bool {
+        metadata.uid() == unsafe { libc::getuid() }
+    }
+
+    fn untrusted(path: &Path) -> io::Error {
+        io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("refusing untrusted daemon path '{}'", path.display()),
+        )
     }
 
     pub fn bind(paths: &DaemonPaths) -> io::Result<Listener> {
@@ -228,6 +266,8 @@ mod local {
     }
 
     pub fn connect(paths: &DaemonPaths) -> io::Result<Stream> {
+        verify_private_directory(&paths.directory)?;
+        verify_owned_socket(&paths.endpoint)?;
         UnixStream::connect(&paths.endpoint)
     }
 
@@ -294,11 +334,12 @@ mod local {
     }
 }
 
-struct EndpointGuard<'a>(&'a Path);
+struct EndpointGuard<'a>(&'a DaemonPaths);
 
 impl Drop for EndpointGuard<'_> {
     fn drop(&mut self) {
-        let _ = fs::remove_file(self.0);
+        let _ = fs::remove_file(&self.0.endpoint);
+        let _ = fs::remove_file(&self.0.token);
     }
 }
 
@@ -308,8 +349,10 @@ pub fn serve(options: Options) -> Result<()> {
     let paths = DaemonPaths::discover();
     local::prepare_directory(&paths.directory).map_err(Error::RuntimeDirectory)?;
     let _lock = local::acquire_lock(&paths.lock)?;
+    let token = protocol::AuthToken::generate()?;
+    let _endpoint_guard = EndpointGuard(&paths);
+    fs::write(&paths.token, token.as_str())?;
     let listener = local::bind(&paths).map_err(Error::Bind)?;
-    let _endpoint_guard = EndpointGuard(&paths.endpoint);
     let mut session = Session::new(options);
     let mut highlight = |input: Input<'_>, request: RequestOptions| {
         session.update_config(request.config.as_deref())?;
@@ -323,7 +366,7 @@ pub fn serve(options: Options) -> Result<()> {
             Err(error) => Some(Err(Error::Io(error))),
             Ok(mut stream) => match set_timeouts(&stream)
                 .map_err(Error::Io)
-                .and_then(|()| protocol::serve_connection(&mut stream, &mut highlight))
+                .and_then(|()| protocol::serve_connection(&mut stream, &token, &mut highlight))
             {
                 Ok(true) => Some(Ok(())),
                 Ok(false) | Err(_) => None,
@@ -339,8 +382,10 @@ fn set_timeouts(stream: &local::Stream) -> io::Result<()> {
 }
 
 fn exchange(input: Input<'_>, options: RequestOptions) -> Result<String> {
-    let mut stream = local::connect(&DaemonPaths::discover()).map_err(Error::Io)?;
-    protocol::exchange(&mut stream, CLIENT_REQUEST_ID, input, options)
+    let paths = DaemonPaths::discover();
+    let mut stream = local::connect(&paths).map_err(Error::Io)?;
+    let token = protocol::AuthToken::new(&fs::read_to_string(&paths.token)?);
+    protocol::exchange(&mut stream, CLIENT_REQUEST_ID, &token, input, options)
 }
 
 /// Send a highlight request to the running daemon.
@@ -453,6 +498,32 @@ mod tests {
         let error = local::acquire_lock(&paths.lock).unwrap_err();
 
         assert!(matches!(error, Error::AlreadyRunning));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn client_refuses_untrusted_runtime_directories() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let trusted = DaemonPaths::in_directory(&root.path().join("trusted"));
+        local::prepare_directory(&trusted.directory).unwrap();
+        let _listener = local::bind(&trusted).unwrap();
+        assert!(local::connect(&trusted).is_ok());
+
+        let link = root.path().join("link");
+        std::os::unix::fs::symlink(&trusted.directory, &link).unwrap();
+        let symlinked = DaemonPaths::in_directory(&link);
+        assert_eq!(
+            local::connect(&symlinked).unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+
+        fs::set_permissions(&trusted.directory, fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            local::connect(&trusted).unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
     }
 
     #[test]

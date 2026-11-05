@@ -417,10 +417,20 @@ directory:
 <temporary-directory>/lighter-<uid>/
 ```
 
-The directory is created with mode `0700`. It contains `daemon.sock` and
-`daemon.lock`; the lock file records the daemon PID. The endpoint is removed
-when the server exits. On Windows, the endpoint file stores the loopback TCP
-address and the lock uses exclusive file sharing.
+The directory is created with mode `0700`. It contains `daemon.sock`,
+`daemon.lock` and `daemon.token`; the lock file records the daemon PID. The
+endpoint and token are removed when the server exits. On Windows, the endpoint
+file stores the loopback TCP address and the lock uses exclusive file sharing.
+
+Trust model: a request can name a config whose server commands the daemon runs,
+so only the daemon's own user may submit requests. The daemon writes a random
+256-bit token to `daemon.token` and rejects any request without it, including
+`daemon kill`; reading the token requires access to the per-user runtime
+directory. This is what protects the Windows loopback TCP endpoint. On Unix the
+client also refuses to connect unless the runtime directory is a real directory
+owned by the current user with no group or other permissions, and the socket is
+owned by the current user; otherwise it falls back to one-shot highlighting.
+Request and response bodies are limited to 64 MiB and headers to 1 MiB.
 
 `daemon kill` sends a reserved stop request. The daemon acknowledges it with an
 empty successful response and then exits. Killing when no daemon is
@@ -428,14 +438,15 @@ connectable is an error.
 
 ### 1.14 Daemon wire protocol
 
-The internal daemon protocol version is `5`. Each request uses a fresh stream
+The internal daemon protocol version is `6`. Each request uses a fresh stream
 connection and consists of:
 
 1. one newline-terminated JSON header; and
 2. exactly `length` raw UTF-8 source bytes.
 
 The request header contains the version, numeric request id, language, source
-byte length, optional path and project, and flattened request options.
+byte length, optional path and project, the daemon token, and flattened request
+options.
 
 A response has the same framing: a newline-terminated JSON header followed by
 exactly `length` UTF-8 bytes. It repeats the protocol version and request id.
