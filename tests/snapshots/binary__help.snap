@@ -4,6 +4,8 @@ expression: snapshot(&output)
 ---
 exit: 0
 --- stdout ---
+IDE-grade code highlighting
+
 Usage: lighter [OPTIONS] [FILE]
        lighter <COMMAND>
 
