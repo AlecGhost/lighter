@@ -23,6 +23,7 @@ use crate::logging::LogLevel;
 const JSON_RPC_VERSION: &str = "2.0";
 const CONTENT_LENGTH: &str = "Content-Length";
 const MAX_MESSAGE_SIZE: usize = 64 * 1024 * 1024;
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 const METHOD_NOT_FOUND_CODE: i64 = -32601;
 const METHOD_NOT_FOUND_MESSAGE: &str = "Method not found";
 
@@ -36,6 +37,17 @@ pub enum Error {
     Protocol(#[from] ProtocolError),
     #[error("Language server returned error {code}: {message}")]
     Response { code: i64, message: String },
+}
+
+impl Error {
+    /// Whether the connection can no longer be trusted to carry further requests.
+    pub(crate) fn is_transport(&self) -> bool {
+        matches!(
+            self,
+            Self::Io(_)
+                | Self::Protocol(ProtocolError::ReaderDisconnected | ProtocolError::Timeout { .. })
+        )
+    }
 }
 
 pub(crate) type Result<T> = std::result::Result<T, Error>;
@@ -52,6 +64,8 @@ pub enum ProtocolError {
     ResponseDuringProgress,
     #[error("Language server reader disconnected")]
     ReaderDisconnected,
+    #[error("Timed out waiting for a response to {method}")]
+    Timeout { method: &'static str },
     #[error("Server request has no id")]
     MissingServerRequestId,
     #[error("Malformed header: {0:?}")]
@@ -185,6 +199,15 @@ impl Connection {
     }
 
     pub(crate) fn request<R: Request>(&mut self, params: R::Params) -> Result<R::Result> {
+        self.request_with_timeout::<R>(params, REQUEST_TIMEOUT)
+    }
+
+    pub(crate) fn request_with_timeout<R: Request>(
+        &mut self,
+        params: R::Params,
+        timeout: Duration,
+    ) -> Result<R::Result> {
+        let deadline = Instant::now() + timeout;
         let id = self.next_request_id;
         self.next_request_id = self
             .next_request_id
@@ -202,7 +225,9 @@ impl Connection {
         )?;
 
         loop {
-            let message = self.receive()?;
+            let message = self
+                .receive_until(deadline)?
+                .ok_or(ProtocolError::Timeout { method: R::METHOD })?;
             let Some(message) = self.handle_incoming(message)? else {
                 continue;
             };
@@ -268,12 +293,6 @@ impl Connection {
             return Err(ProtocolError::ResponseDuringProgress.into());
         }
         Ok(true)
-    }
-
-    fn receive(&self) -> Result<IncomingMessage> {
-        self.incoming
-            .recv()
-            .map_err(|_| Error::from(ProtocolError::ReaderDisconnected))?
     }
 
     fn receive_until(&self, deadline: Instant) -> Result<Option<IncomingMessage>> {
@@ -1012,6 +1031,33 @@ mod tests {
             ProtocolError::MismatchedResponse {
                 received: CLIENT_REQUEST_ID + 1,
                 expected: CLIENT_REQUEST_ID,
+            },
+        );
+    }
+
+    #[test]
+    fn requests_time_out_when_the_server_never_responds() {
+        const SILENT_READER_DELAY: Duration = Duration::from_secs(30);
+        let mut connection = Connection::from_io(
+            DelayedEofReader::new(Vec::new(), SILENT_READER_DELAY),
+            SharedBuffer::default(),
+            SharedBuffer::default(),
+            LogLevel::Error,
+        );
+
+        let error = connection
+            .request_with_timeout::<TestRequest>(
+                Payload {
+                    text: TEST_PAYLOAD_TEXT.to_owned(),
+                },
+                TEST_WAIT_TIMEOUT,
+            )
+            .unwrap_err();
+
+        assert_protocol_error(
+            error,
+            ProtocolError::Timeout {
+                method: TEST_REQUEST_METHOD,
             },
         );
     }

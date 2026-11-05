@@ -19,6 +19,7 @@ pub use protocol::RequestOptions;
 const CLIENT_REQUEST_ID: u64 = 1;
 const STARTUP_ATTEMPTS: usize = 250;
 const STARTUP_POLL_INTERVAL: Duration = Duration::from_millis(20);
+const CONNECTION_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum DaemonPath {
@@ -320,12 +321,21 @@ pub fn serve(options: Options) -> Result<()> {
         .incoming()
         .find_map(|connection| match connection {
             Err(error) => Some(Err(Error::Io(error))),
-            Ok(mut stream) => match protocol::serve_connection(&mut stream, &mut highlight) {
+            Ok(mut stream) => match set_timeouts(&stream)
+                .map_err(Error::Io)
+                .and_then(|()| protocol::serve_connection(&mut stream, &mut highlight))
+            {
                 Ok(true) => Some(Ok(())),
                 Ok(false) | Err(_) => None,
             },
         })
         .unwrap_or(Ok(()))
+}
+
+/// Keeps a client that stops sending or reading from blocking later clients.
+fn set_timeouts(stream: &local::Stream) -> io::Result<()> {
+    stream.set_read_timeout(Some(CONNECTION_TIMEOUT))?;
+    stream.set_write_timeout(Some(CONNECTION_TIMEOUT))
 }
 
 fn exchange(input: Input<'_>, options: RequestOptions) -> Result<String> {
