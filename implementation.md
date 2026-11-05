@@ -365,8 +365,11 @@ The JSON-RPC client handles the server interactions Lighter needs:
 Unknown server requests receive JSON-RPC “method not found.” Incoming messages
 larger than 64 MiB are rejected. Language-server standard error is discarded.
 
-When a cached client is dropped, Lighter sends `shutdown`, sends `exit`, and
-waits for the child process.
+Requests time out after 60 seconds. After a timeout or other transport failure,
+the cached client is replaced by a fresh server on its next use.
+
+When a cached client is dropped, Lighter sends `shutdown` (bounded at two
+seconds), sends `exit`, kills the child if `shutdown` failed, and waits for it.
 
 ### 1.12 Logging
 

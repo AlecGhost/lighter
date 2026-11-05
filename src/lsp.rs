@@ -36,6 +36,7 @@ const DOCUMENT_OPEN_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 /// Initial wait once a server has already settled after an earlier document.
 const WARM_DOCUMENT_OPEN_WAIT_TIMEOUT: Duration = Duration::from_millis(300);
 const PROGRESS_END_WAIT_TIMEOUT: Duration = Duration::from_secs(15);
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 
 static NEXT_TEMP_FILE_ID: AtomicUsize = AtomicUsize::new(0);
 
@@ -254,6 +255,9 @@ impl ServerRegistry {
     pub fn get_server(&mut self, language: LangName, project: Option<&Path>) -> Result<Server<'_>> {
         let project = project.map(Project::new).transpose()?;
         let key = ServerKey::new(language.clone(), project.as_ref());
+        if self.clients.get(&key).is_some_and(Client::is_broken) {
+            self.clients.remove(&key);
+        }
         let client = match self.clients.entry(key) {
             std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
             std::collections::hash_map::Entry::Vacant(entry) => {
@@ -370,6 +374,7 @@ struct Connection {
     rpc: rpc::Connection,
     /// Whether the server already settled after an earlier `didOpen`.
     warm: bool,
+    broken: bool,
 }
 
 /// A synchronous LSP client connected to one language server over stdio.
@@ -431,6 +436,7 @@ impl Client {
             child,
             rpc: rpc::Connection::new(stdout, stdin, command_entry.configuration.clone(), log),
             warm: false,
+            broken: false,
         })
     }
 
@@ -447,11 +453,32 @@ impl Client {
             .and_then(full_semantic_tokens_legend))
     }
 
+    /// Whether a transport failure left the server unusable, so it must be replaced.
+    fn is_broken(&self) -> bool {
+        match self.connection.lock() {
+            Ok(connection) => connection.broken,
+            Err(_) => true,
+        }
+    }
+
     fn get_semantic_tokens(&self, text: &str, path: Option<&Path>) -> Result<Vec<SemanticToken>> {
         let document = Document::new(text, path, &self.language)?;
-        let uri = document.uri.clone();
         let mut connection = self.connection.lock().expect("Connection lock poisoned");
+        let result = self.request_semantic_tokens(&mut connection, document.uri.clone(), text);
+        if let Err(Error::Rpc(error)) = &result
+            && error.is_transport()
+        {
+            connection.broken = true;
+        }
+        result
+    }
 
+    fn request_semantic_tokens(
+        &self,
+        connection: &mut Connection,
+        uri: Uri,
+        text: &str,
+    ) -> Result<Vec<SemanticToken>> {
         connection
             .rpc
             .notify::<DidOpenTextDocument>(DidOpenTextDocumentParams {
@@ -667,8 +694,13 @@ impl Drop for Client {
             .connection
             .get_mut()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let _ = connection.rpc.request::<Shutdown>(());
+        let shutdown = connection
+            .rpc
+            .request_with_timeout::<Shutdown>((), SHUTDOWN_TIMEOUT);
         let _ = connection.rpc.notify::<Exit>(());
+        if shutdown.is_err() {
+            let _ = connection.child.kill();
+        }
         let _ = connection.child.wait();
     }
 }
