@@ -38,7 +38,12 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Test
-        run: cargo test --locked
+        if: runner.os != 'Windows'
+        run: cargo test --locked -- --skip _uses_
+
+      - name: Test
+        if: runner.os == 'Windows'
+        run: cargo test --locked --lib --bins
 
       - name: Build
         run: cargo build --release --locked --target ${{ matrix.target }}

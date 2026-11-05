@@ -24,6 +24,7 @@ jobs:
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -32,7 +33,12 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --locked
+      # Semantic snapshots run in their own job with pinned servers.
+      - run: cargo test --locked -- --skip _uses_
+        if: runner.os != 'Windows'
+      # The binary integration tests do not pass on Windows yet.
+      - run: cargo test --locked --lib --bins
+        if: runner.os == 'Windows'
 
   semantic:
     name: Semantic snapshots

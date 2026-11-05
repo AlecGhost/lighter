@@ -261,6 +261,9 @@ mod local {
     pub type Listener = TcpListener;
     pub type Stream = TcpStream;
 
+    /// Returned when another process holds the lock file open without sharing.
+    const ERROR_SHARING_VIOLATION: i32 = 32;
+
     pub fn prepare_directory(path: &Path) -> io::Result<()> {
         fs::create_dir_all(path)
     }
@@ -282,10 +285,9 @@ mod local {
             .share_mode(0)
             .write(true)
             .open(path)
-            .map_err(|error| match error.kind() {
-                io::ErrorKind::AlreadyExists | io::ErrorKind::PermissionDenied => {
-                    Error::AlreadyRunning
-                }
+            .map_err(|error| match (error.kind(), error.raw_os_error()) {
+                (io::ErrorKind::AlreadyExists | io::ErrorKind::PermissionDenied, _)
+                | (_, Some(ERROR_SHARING_VIOLATION)) => Error::AlreadyRunning,
                 _ => Error::Lock(error),
             })
     }
