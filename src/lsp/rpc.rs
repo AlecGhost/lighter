@@ -515,7 +515,7 @@ mod tests {
     const OTHER_PROGRESS_END_MESSAGE: &str = "other end message";
     const PROGRESS_END_MESSAGE: &str = "end message";
     const TEST_WAIT_TIMEOUT: Duration = Duration::from_millis(10);
-    const TEST_READER_DELAY: Duration = Duration::from_millis(50);
+    const TEST_READER_DELAY: Duration = Duration::from_secs(1);
     #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
     struct Payload {
         text: String,
