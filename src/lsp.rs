@@ -33,6 +33,8 @@ const DEFAULT_DOCUMENT_EXTENSION: &str = "txt";
 const MAX_TEMP_FILE_ATTEMPTS: usize = 100;
 const URI_HEX_DIGITS: &[u8; 16] = b"0123456789ABCDEF";
 const DOCUMENT_OPEN_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
+/// Initial wait once a server has already settled after an earlier document.
+const WARM_DOCUMENT_OPEN_WAIT_TIMEOUT: Duration = Duration::from_millis(300);
 const PROGRESS_END_WAIT_TIMEOUT: Duration = Duration::from_secs(15);
 
 static NEXT_TEMP_FILE_ID: AtomicUsize = AtomicUsize::new(0);
@@ -366,6 +368,8 @@ impl Drop for TemporaryDocument {
 struct Connection {
     child: Child,
     rpc: rpc::Connection,
+    /// Whether the server already settled after an earlier `didOpen`.
+    warm: bool,
 }
 
 /// A synchronous LSP client connected to one language server over stdio.
@@ -426,6 +430,7 @@ impl Client {
         Ok(Connection {
             child,
             rpc: rpc::Connection::new(stdout, stdin, command_entry.configuration.clone(), log),
+            warm: false,
         })
     }
 
@@ -457,9 +462,14 @@ impl Client {
                     text.to_string(),
                 ),
             })?;
+        let initial_wait = match connection.warm {
+            true => WARM_DOCUMENT_OPEN_WAIT_TIMEOUT,
+            false => DOCUMENT_OPEN_WAIT_TIMEOUT,
+        };
         connection
             .rpc
-            .wait_for_progress(DOCUMENT_OPEN_WAIT_TIMEOUT, PROGRESS_END_WAIT_TIMEOUT)?;
+            .wait_for_progress(initial_wait, PROGRESS_END_WAIT_TIMEOUT)?;
+        connection.warm = true;
 
         let token_result = connection
             .rpc
