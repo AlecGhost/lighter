@@ -262,15 +262,21 @@ impl ServerRegistry {
                 entry.insert(Client::new(command, &language, project.as_ref(), self.log)?)
             }
         };
-        let mapping = self.lang_mapping.entry(language).or_default();
-
-        mapping.extend(
-            self.general_mapping
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone())),
-        );
+        let mapping = effective_mapping(&self.general_mapping, self.lang_mapping.get(&language));
         Ok(Server { client, mapping })
     }
+}
+
+/// Language-specific capture mappings take precedence over general ones.
+fn effective_mapping(
+    general: &CaptureMapping,
+    language: Option<&CaptureMapping>,
+) -> CaptureMapping {
+    general
+        .iter()
+        .chain(language.into_iter().flatten())
+        .map(|(token, capture)| (token.clone(), capture.clone()))
+        .collect()
 }
 
 #[derive(Debug)]
@@ -301,7 +307,7 @@ impl Project {
 
 pub struct Server<'a> {
     client: &'a Client,
-    mapping: &'a HashMap<String, String>,
+    mapping: CaptureMapping,
 }
 
 impl Server<'_> {
@@ -317,7 +323,7 @@ impl Server<'_> {
             &tokens,
             &self.client.semantic_tokens_legend,
             pattern_index,
-            self.mapping,
+            &self.mapping,
         ))
     }
 }
@@ -844,6 +850,24 @@ mod tests {
                 .keys()
                 .all(|language| lang_mapping.contains_key(language))
         );
+    }
+
+    #[test]
+    fn language_capture_mappings_override_general_mappings() {
+        let mapping = |entries: &[(&str, &str)]| -> CaptureMapping {
+            entries
+                .iter()
+                .map(|(token, capture)| ((*token).to_owned(), (*capture).to_owned()))
+                .collect()
+        };
+        let general = mapping(&[("const", "variable"), ("parameter", "variable.parameter")]);
+        let language = mapping(&[("const", "constant")]);
+
+        assert_eq!(
+            effective_mapping(&general, Some(&language)),
+            mapping(&[("const", "constant"), ("parameter", "variable.parameter")])
+        );
+        assert_eq!(effective_mapping(&general, None), general);
     }
 
     #[test]
