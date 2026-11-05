@@ -211,6 +211,9 @@ const = "constant"
 decorator = "constant"
 ```
 
+Language-specific mappings (`[captures.rust]`, including the built-in defaults)
+take precedence over general `[captures]` entries.
+
 A custom theme can be selected relative to the configuration file:
 
 ```toml

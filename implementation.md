@@ -284,8 +284,9 @@ const = "constant"
 ```
 
 String entries are general mappings. Table entries are per-language mappings.
-When a server is retrieved, general mappings are extended into that language's
-map and therefore take precedence over a same-named language-specific entry.
+When a server is retrieved, its effective mapping is the general mappings
+overlaid with that language's mappings, so a language-specific entry (built-in
+or configured) takes precedence over a same-named general entry.
 Mapping keys are LSP token-type names and values are Arborium capture names.
 
 The built-in language-server commands are:
