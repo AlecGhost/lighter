@@ -332,7 +332,8 @@ the client:
 4. sends `textDocument/didClose`, including when a successful token response is
    empty.
 
-The initial progress wait is bounded at five seconds. Once progress has begun,
+The initial progress wait is five seconds for a server's first document and
+300 ms for later documents on the same server. Once progress has begun,
 the completion wait is bounded at fifteen seconds; unfinished progress state is
 cleared after the timeout. These waits do not cancel the later semantic-token
 request.
